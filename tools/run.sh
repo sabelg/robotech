@@ -2,7 +2,15 @@
 set -euo pipefail
 
 APP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FLINT_ROOT="${FLINT_ROOT:-/home/user/flint}"
+if [[ -z "${FLINT_ROOT:-}" ]]; then
+    if [[ -d "${APP_ROOT}/../flint/src/flint" ]]; then
+        FLINT_ROOT="$(cd "${APP_ROOT}/../flint" && pwd)"
+    elif [[ -d "${HOME}/flint/src/flint" ]]; then
+        FLINT_ROOT="${HOME}/flint"
+    else
+        FLINT_ROOT="/home/user/flint"
+    fi
+fi
 cd "$APP_ROOT"
 
 if [[ ! -d "${FLINT_ROOT}/src/flint" ]]; then
@@ -20,8 +28,8 @@ resolve_mojo() {
     for candidate in \
         "${APP_ROOT}/.pixi/envs/default" \
         "${FLINT_ROOT}/.pixi/envs/default" \
-        "/home/user/rollercoaster/.pixi/envs/default" \
-        "/home/user/.pixi/envs/turbomojo"; do
+        "${APP_ROOT}/../rollercoaster/.pixi/envs/default" \
+        "${HOME}/.pixi/envs/turbomojo"; do
         if [[ -x "${candidate}/bin/mojo" ]]; then
             export MOJO_PREFIX="${candidate}"
             export MODULAR_HOME="${candidate}/share/max"
