@@ -12,6 +12,9 @@ Powered by Flint's hardware Vulkan / AMDGPU RDNA GFX12 compute pipeline
 from std.ffi import external_call
 from std.math import sin, cos, sqrt
 from flint.core.math import Vec3
+from flint.core.transform import Quat, trs
+from flint.assets.model import NativeModel, NativeMesh
+from flint.assets.mesh_builder import MeshBuilder, append_node_meshes
 from flint.render.lighting import LightingProfile
 from flint.render.simd_canvas import Camera3D, SimdCanvas
 from flint.render.rasterizer import dot
@@ -25,6 +28,7 @@ from robotech.asset_forge import RobotechAssetPack
 from robotech.mecha_meshes import (
     MechaPose,
     pose_and_draw_vf1,
+    draw_vf1_planar_shadow,
     pose_and_draw_regult,
     pose_and_draw_glaug,
     pose_and_draw_queadluun,
@@ -36,7 +40,13 @@ from robotech.sim_world import (
     MODE_FIGHTER,
     MODE_GUARDIAN,
     MODE_BATTLOID,
+    PILOT_SKULL_LEADER,
+    PILOT_MAX_STERLING,
+    PILOT_MIRIYA_ACE,
     THEATER_MACROSS_ISLAND,
+    THEATER_HIGH_ORBIT,
+    THEATER_BOSS_FLEET,
+    SUBSYS_BRIDGE,
     ENEMY_GLAUG,
     ENEMY_QUEADLUUN,
     BOLT_UN_STRIKE_BEAM,
@@ -55,16 +65,61 @@ comptime CAM_COCKPIT: Int = 1
 comptime CAM_ACTION: Int = 2
 
 
+def _build_hangar_deck_model() -> NativeModel:
+    """Builds the 3D UN Spacy CVS-101 Prometheus Flight Hangar Turntable Deck + Overhead Gantry Struts."""
+    var model = NativeModel()
+    var deck = MeshBuilder(base_color=0xFF42546E, roughness=0.48, metallic=0.30)
+    deck.add_beveled_box(Vec3(0.0, -0.25, 0.0), Vec3(18.0, 0.25, 18.0), bevel=0.06)
+    # Raised sunlit turntable platform on left showcase bay (`+X` when viewed from `+Z`)
+    deck.add_cylinder(Vec3(2.55, -0.02, 0.0), Vec3(2.55, 0.02, 0.0), 4.6, 4.4, 28)
+    # Rear hangar bulkhead pillars & overhead gantry truss
+    for k in range(-2, 3):
+        var gx = Float32(k) * Float32(4.2)
+        deck.add_beveled_box(Vec3(gx, 3.6, -8.5), Vec3(0.32, 3.8, 0.32), bevel=0.04)
+    deck.add_beveled_box(Vec3(0.0, 7.2, -8.5), Vec3(11.0, 0.35, 0.45), bevel=0.05)
+
+    var hazard = MeshBuilder(base_color=0xFFF0BE32, roughness=0.36, metallic=0.20)
+    hazard.add_beveled_box(Vec3(2.55, 0.022, 4.85), Vec3(4.4, 0.015, 0.16), bevel=0.005)
+    hazard.add_beveled_box(Vec3(2.55, 0.022, -4.85), Vec3(4.4, 0.015, 0.16), bevel=0.005)
+
+    var strip = MeshBuilder(
+        base_color=0xFF4CEEFF,
+        roughness=0.10,
+        metallic=0.0,
+        emissive_color=Vec3(0.28, 0.92, 1.0),
+        emissive_strength=1.85,
+    )
+    for side in range(2):
+        var sgn = Float32(-1.0) if side == 0 else Float32(1.0)
+        strip.add_beveled_box(Vec3(2.55 + sgn * 4.95, 0.024, 0.0), Vec3(0.09, 0.015, 5.8), bevel=0.004)
+        strip.add_beveled_box(Vec3(sgn * 4.2, 6.8, -8.1), Vec3(1.4, 0.08, 0.08), bevel=0.01)
+
+    var prims = List[NativeMesh]()
+    prims.append(deck^.finish())
+    prims.append(hazard^.finish())
+    prims.append(strip^.finish())
+    _ = append_node_meshes(model, "prometheus_hangar", prims)
+    return model^
+
+
 struct RobotechRenderer(Movable):
     var scene: GpuSceneRenderer
     var assets: RobotechAssetPack
+    var hangar_deck: NativeModel
     var cam_mode: Int
+    var show_briefing: Bool
+    var bgm_on: Bool
+    var replay_label: String
     var fonts_loaded: Bool
 
     def __init__(out self, width: Int = 1280, height: Int = 720, prefer_gpu: Bool = True):
         self.scene = GpuSceneRenderer(width, height, prefer_gpu=prefer_gpu)
         self.assets = RobotechAssetPack()
+        self.hangar_deck = _build_hangar_deck_model()
         self.cam_mode = CAM_CHASE
+        self.show_briefing = False
+        self.bgm_on = True
+        self.replay_label = String()
         self.scene.fb.min_text_em = 11.0
         self.fonts_loaded = self.scene.fb.load_fonts(
             "assets/fonts/cockpit_hud.ttf",
@@ -287,7 +342,95 @@ struct RobotechRenderer(Movable):
             var rad = Float32(2.1) if sim.enemies[ei].kind >= ENEMY_GLAUG else Float32(1.6)
             self.scene.add_shadow_sphere(sim.enemies[ei].pos + Vec3(0.0, 0.75, 0.0), rad)
 
+    def _render_briefing_frame(mut self, mut canvas: SimdCanvas, sim: RobotechSimWorld):
+        """Renders the 3D CVS-101 Prometheus Flight Hangar + Rotating Pilot Valkyrie + GPU Planar Deck Shadow + Tactical Briefing Overlay."""
+        var w = canvas.width
+        var h = canvas.height
+        self._ensure_size(w, h)
+
+        var p = LightingProfile()
+        p.key_direction = Vec3(0.24, -0.88, -0.41).normalized()
+        p.key_color = Vec3(1.02, 0.98, 0.92)
+        p.fill_direction = Vec3(-0.36, 0.62, 0.68).normalized()
+        p.fill_color = Vec3(0.26, 0.42, 0.60)
+        p.hemisphere_sky = Vec3(0.28, 0.38, 0.52)
+        p.hemisphere_ground = Vec3(0.12, 0.16, 0.22)
+        p.rim_direction = Vec3(-0.28, -0.22, -0.93).normalized()
+        p.rim_color = Vec3(0.28, 0.48, 0.66)
+        p.fog_color = Vec3(12, 20, 32)
+        p.fog_start = 28.0
+        p.fog_end = 72.0
+        p.exposure = 1.02
+        p.saturation = 1.08
+        p.filmic = 1.0
+
+        var eye = Vec3(-0.15, 3.35, 10.4)
+        var tgt = Vec3(0.10, 1.35, 0.0)
+        self.scene.begin_frame(eye, tgt, 46.0, p, dt=1.0 / 60.0, quality=2, reduced_effects=False)
+        self.scene.add_point_light(Vec3(2.55, 5.6, 2.2), Vec3(0.65, 0.94, 1.0), 15.0, 0.95, priority=95, stable_id=10)
+        self.scene.add_point_light(Vec3(5.2, 2.4, 3.4), Vec3(1.0, 0.80, 0.45), 12.0, 0.62, priority=80, stable_id=11)
+        self.scene.commit_lighting()
+
+        # Hangar floor, turntable & gantry
+        var deck_mat = trs(Vec3(0.0, 0.0, 0.0), Quat(), Vec3(1.0, 1.0, 1.0))
+        self.scene.draw_model(self.hangar_deck, deck_mat)
+
+        # Subtle hangar atmospheric starlight beyond launch bay opening
+        for i in range(28):
+            var sx = Float32((i * 37) % 24) - Float32(12.0)
+            var sy = Float32(1.2) + Float32((i * 19) % 10) * Float32(0.65)
+            self.scene.draw_billboard(Vec3(sx, sy, -18.0), 0.14, FX_SOFT, 0xFFD8F0FF, 185, emissive=1.8)
+
+        # Rotating 3D Squadron VF-1 Valkyrie + GPU Directional Planar Deck Shadow in Left Bay!
+        var fg = sim.morph_fg.value
+        var turntable_y = Float32(1.52) + fg * Float32(0.95)
+        var rot_yaw = Float32(-0.62) + sim.sim_time * Float32(0.48)
+        var vf_pose = MechaPose.from_angles(Vec3(2.55, turntable_y, 0.35), rot_yaw, Float32(0.03) * (Float32(1.0) - fg), Float32(0.0), Float32(1.04))
+        pose_and_draw_vf1(
+            self.scene,
+            self.assets,
+            sim.pilot_id,
+            vf_pose,
+            sim.morph_fg.value,
+            sim.morph_gb.value,
+            afterburner=0.35,
+            gun_flash=False,
+            shield_active=sim.mode == MODE_BATTLOID,
+            fast_packs=sim.fast_packs,
+            strike_flash=False,
+        )
+        draw_vf1_planar_shadow(
+            self.scene,
+            self.assets,
+            sim.pilot_id,
+            vf_pose,
+            sim.fast_packs,
+            plane_point=Vec3(0.0, 0.035, 0.0),
+            plane_normal=Vec3(0.0, 1.0, 0.0),
+            shadow_color=0xFF060A12,
+            max_alpha=185,
+        )
+
+        self.scene.end_scene()
+        self._draw_briefing_hud(sim)
+        _ = self.scene.present_headless()
+
+        if len(canvas.pixels) >= w * h and len(self.scene.fb.pixels) >= w * h:
+            _ = external_call["memcpy", Int](
+                Int(canvas.pixels.unsafe_ptr()),
+                Int(self.scene.fb.pixels.unsafe_ptr()),
+                w * h * 4,
+            )
+        canvas.triangles_drawn = (
+            self.scene.fb.gpu.triangle_count if self.scene.using_gpu() else self.scene.fb.drawn_triangles
+        )
+        canvas.sprites_drawn = 28
+
     def render_frame(mut self, mut canvas: SimdCanvas, sim: RobotechSimWorld, boost_held: Bool = False):
+        if self.show_briefing:
+            self._render_briefing_frame(canvas, sim)
+            return
+
         var w = canvas.width
         var h = canvas.height
         self._ensure_size(w, h)
@@ -300,7 +443,8 @@ struct RobotechRenderer(Movable):
         self._register_combat_lights_and_shadows(sim, boost_held)
         self.scene.commit_lighting()
 
-        # 1. Theater Environment (Macross Island Pacific + Cloud Deck OR High Orbit Earth) + SDF-1 Reflex Cannon
+        # 1. Theater Environment + SDF-1 Cruiser / Humanoid Storm Attacker + Daedalus Attack + Reflex Cannon
+        var daed_tgt = sim.boss_pos if sim.boss_active else (sim.pos + sim.forward_vec() * Float32(145.0))
         draw_macross_environment(
             self.scene,
             self.assets,
@@ -310,6 +454,9 @@ struct RobotechRenderer(Movable):
             sim.sim_time,
             sim.reflex_beam_t,
             sim.reflex_target_pos,
+            sim.sdf1_storm_morph.value,
+            sim.daedalus_attack_t,
+            daed_tgt,
         )
 
         # 2. Colossal Zentraedi Thuverl-Salan Heavy Destroyer Boss (Mission 3+)
@@ -317,7 +464,8 @@ struct RobotechRenderer(Movable):
             var b_pose = MechaPose.from_angles(sim.boss_pos, sim.boss_yaw, Float32(-0.03), Float32(0.04), Float32(1.0))
             draw_thuverl_salan_boss(self.scene, self.assets, b_pose, sim.boss_flash_t > Float32(0.0))
 
-        # 3. Zentraedi Regult Battlepods, Glaug Officers & Miriya's Queadluun-Rau Aces
+        # 3. Zentraedi Regult Battlepods, Glaug Officers & Miriya's Queadluun-Rau Aces (+ Low-Alt Ocean/Island Shadows)
+        var sea_plane = Vec3(0.0, 0.35, 0.0)
         for i in range(MAX_ENEMIES):
             if not sim.enemies[i].active:
                 continue
@@ -333,17 +481,24 @@ struct RobotechRenderer(Movable):
             )
             if e.kind == ENEMY_QUEADLUUN:
                 pose_and_draw_queadluun(self.scene, self.assets, e_pose, e.stride_phase, e.firing_flash > Float32(0.0))
+                if sim.theater == THEATER_MACROSS_ISLAND and e.pos.y < Float32(58.0):
+                    self.scene.draw_planar_shadow_model(self.assets.queadluun, e_pose.to_mat4(), sea_plane)
             elif e.kind == ENEMY_GLAUG:
                 pose_and_draw_glaug(self.scene, self.assets, e_pose, e.stride_phase, e.firing_flash > Float32(0.0))
+                if sim.theater == THEATER_MACROSS_ISLAND and e.pos.y < Float32(58.0):
+                    self.scene.draw_planar_shadow_model(self.assets.glaug, e_pose.to_mat4(), sea_plane)
             else:
                 pose_and_draw_regult(self.scene, self.assets, e_pose, e.stride_phase, e.firing_flash > Float32(0.0))
+                if sim.theater == THEATER_MACROSS_ISLAND and e.pos.y < Float32(58.0):
+                    self.scene.draw_planar_shadow_model(self.assets.regult, e_pose.to_mat4(), sea_plane)
 
-        # 4. Wingman VF-1J ("MAX STERLING - SKULL 2" in Cobalt Blue Livery)
+        # 4. Wingman VF-1 ("MAX STERLING - BLUE 2", or "ROY FOCKER - SKULL 1" when player flies as Max)
+        var wing_pilot = PILOT_SKULL_LEADER if sim.pilot_id == PILOT_MAX_STERLING else PILOT_MAX_STERLING
         var wing_pose = MechaPose.from_angles(sim.wing_pos, sim.wing_yaw, sim.wing_pitch, Float32(-0.18), Float32(1.0))
         pose_and_draw_vf1(
             self.scene,
             self.assets,
-            False,
+            wing_pilot,
             wing_pose,
             sim.wing_morph_fg.value,
             sim.wing_morph_gb.value,
@@ -353,8 +508,10 @@ struct RobotechRenderer(Movable):
             fast_packs=sim.fast_packs,
             strike_flash=False,
         )
+        if sim.theater == THEATER_MACROSS_ISLAND and sim.wing_pos.y < Float32(68.0):
+            draw_vf1_planar_shadow(self.scene, self.assets, wing_pilot, wing_pose, sim.fast_packs, sea_plane)
 
-        # 5. Player VF-1S Valkyrie ("SKULL LEADER") or 1st-Person Physical 3D Cockpit Canopy
+        # 5. Player VF-1 Valkyrie (Active Squadron Pilot Livery) or 1st-Person Physical 3D Cockpit Canopy
         if self.cam_mode != CAM_COCKPIT:
             var p_pose = MechaPose.from_angles(sim.pos, sim.yaw, sim.pitch, sim.roll.value, Float32(1.05))
             var ab = Float32(1.0) if boost_held else Float32(0.58)
@@ -362,7 +519,7 @@ struct RobotechRenderer(Movable):
             pose_and_draw_vf1(
                 self.scene,
                 self.assets,
-                True,
+                sim.pilot_id,
                 p_pose,
                 sim.morph_fg.value,
                 sim.morph_gb.value,
@@ -372,6 +529,18 @@ struct RobotechRenderer(Movable):
                 fast_packs=sim.fast_packs,
                 strike_flash=sim.strike_flash_t > Float32(0.0),
             )
+            if sim.theater == THEATER_MACROSS_ISLAND and sim.pos.y < Float32(68.0):
+                draw_vf1_planar_shadow(self.scene, self.assets, sim.pilot_id, p_pose, sim.fast_packs, sea_plane)
+            elif sim.skimming_hull and sim.boss_active:
+                draw_vf1_planar_shadow(
+                    self.scene,
+                    self.assets,
+                    sim.pilot_id,
+                    p_pose,
+                    sim.fast_packs,
+                    sim.boss_pos + Vec3(0.0, 9.2, 0.0),
+                    max_alpha=148,
+                )
         else:
             var c_pose = MechaPose.from_angles(sim.pos, sim.yaw, sim.pitch, sim.roll.value * Float32(0.35), Float32(1.0))
             self.scene.draw_model(self.assets.cockpit, c_pose.to_mat4(), no_fog=True)
@@ -590,7 +759,7 @@ struct RobotechRenderer(Movable):
                 self._draw_bracket_ui(sx, sy, box_r + 6, 255, 56, 88, 250)
                 self.scene.fb.draw_text("LOCK X" + String(e.lock_marks), sx, sy - box_r - 22, 13, 255, 224, 102, align=1)
 
-        # Thuverl-Salan Destroyer Boss 3D Reticle + Top Capital-Ship Armor Bar!
+        # Thuverl-Salan Destroyer Boss + 4 Destructible Subsystems + Top Capital-Ship Armor Bar!
         if sim.boss_active:
             var bp_ui = self._project_ui(sim.boss_pos)
             if bp_ui[2] and bp_ui[0] > 40 and bp_ui[0] < 1240 and bp_ui[1] > 56 and bp_ui[1] < 650:
@@ -600,16 +769,76 @@ struct RobotechRenderer(Movable):
                 if sim.boss_lock_marks > 0:
                     self.scene.fb.draw_text("SALVO LOCK X" + String(sim.boss_lock_marks), bp_ui[0], bp_ui[1] - 52, 13, 255, 228, 96, align=1)
 
-            self._draw_hud_panel(cx - 270, 50, 540, 32, 0xFF3888, 215)
-            self.scene.fb.draw_text("THUVERL-SALAN HEAVY DESTROYER", cx - 256, 59, 12, 255, 168, 210)
-            var b_ratio = max(Float32(0.0), min(Float32(1.0), sim.boss_hp / max(Float32(1.0), sim.boss_max_hp)))
-            self.scene.fb.draw_rectangle_rounded(cx + 8, 60, 248, 12, 0.4, 28, 18, 36, 225)
-            self.scene.fb.draw_rectangle_rounded(cx + 8, 60, max(4, Int(b_ratio * Float32(248.0))), 12, 0.4, 255, 58, 132, 248)
+            # 3D Subsystem Weakpoint Reticles (Port/Stbd Turrets, Torpedo Bay, Command Bridge)
+            for s in range(len(sim.boss_subsystems)):
+                if not sim.boss_subsystems[s].active:
+                    continue
+                var spos = sim.boss_subsystem_world_pos(s)
+                var sp_ui = self._project_ui(spos)
+                if not sp_ui[2] or sp_ui[0] < 36 or sp_ui[0] > 1244 or sp_ui[1] < 54 or sp_ui[1] > 654:
+                    continue
+                var is_br = s == SUBSYS_BRIDGE
+                var sr = UInt8(255) if is_br else UInt8(72)
+                var sg = UInt8(216) if is_br else UInt8(242)
+                var sb = UInt8(68) if is_br else UInt8(255)
+                self._draw_bracket_ui(sp_ui[0], sp_ui[1], 14, sr, sg, sb, 245)
+                var shp_w = max(2, Int(Float32(28.0) * (sim.boss_subsystems[s].hp / max(Float32(1.0), sim.boss_subsystems[s].max_hp))))
+                self.scene.fb.draw_rectangle(sp_ui[0] - 14, sp_ui[1] - 20, 28, 3, 18, 28, 42, 215)
+                self.scene.fb.draw_rectangle(sp_ui[0] - 14, sp_ui[1] - 20, shp_w, 3, sr, sg, sb, 245)
+                self.scene.fb.draw_text(
+                    sim.boss_subsystem_label(s),
+                    sp_ui[0],
+                    sp_ui[1] + 18,
+                    11,
+                    sr,
+                    sg,
+                    sb,
+                    align=1,
+                )
+                if sim.boss_subsystems[s].lock_marks > 0:
+                    self._draw_bracket_ui(sp_ui[0], sp_ui[1], 19, 255, 62, 92, 250)
 
-        # Wingman Skull-2 IFF Tag
+            var bridge_down = sim.boss_bridge_destroyed()
+            self._draw_hud_panel(cx - 285, 50, 570, 32, UInt32(0xFFD038) if bridge_down else UInt32(0xFF3888), 215)
+            var boss_hdr = (
+                "DESTROYER [2X CRIT EXPOSED!]"
+                if bridge_down
+                else ("DESTROYER [SUBSYS " + String(sim.intact_subsystem_count()) + "/4]")
+            )
+            self.scene.fb.draw_text(
+                boss_hdr,
+                cx - 272,
+                59,
+                12,
+                UInt8(255),
+                UInt8(226) if bridge_down else UInt8(168),
+                UInt8(96) if bridge_down else UInt8(210),
+            )
+            var b_ratio = max(Float32(0.0), min(Float32(1.0), sim.boss_hp / max(Float32(1.0), sim.boss_max_hp)))
+            self.scene.fb.draw_rectangle_rounded(cx + 12, 60, 256, 12, 0.4, 28, 18, 36, 225)
+            self.scene.fb.draw_rectangle_rounded(cx + 12, 60, max(4, Int(b_ratio * Float32(256.0))), 12, 0.4, 255, 58, 132, 248)
+
+        # Hull Trench Skimming Tactical Bonus Badge!
+        if sim.skimming_hull:
+            var skim_y = 86 if sim.boss_active else 52
+            self._draw_hud_panel(cx - 225, skim_y, 450, 26, 0x38FFB8, 220)
+            self.scene.fb.draw_text(
+                "HULL TRENCH SKIMMING — 1.35X WEAPON DMG + FAST REFLEX!",
+                cx,
+                skim_y + 7,
+                12,
+                96,
+                255,
+                204,
+                align=1,
+                fit=428,
+            )
+
+        # Wingman IFF Tag
         var wp = self._project_ui(sim.wing_pos + Vec3(0.0, 2.6, 0.0))
         if wp[2] and wp[0] > 40 and wp[0] < 1220 and wp[1] > 45 and wp[1] < 660:
-            self.scene.fb.draw_text("SKULL-2 [MAX]", wp[0], wp[1] - 12, 12, 98, 192, 255, align=1)
+            var w_tag = "SKULL-1 [FOCKER]" if sim.pilot_id == PILOT_MAX_STERLING else "BLUE-2 [MAX]"
+            self.scene.fb.draw_text(w_tag, wp[0], wp[1] - 12, 12, 98, 192, 255, align=1)
 
         # C. Center Bore-Sight Gunpod Pipper
         self.scene.fb.draw_circle(cx, cy, 3.0, 76, 232, 255, 190)
@@ -619,13 +848,13 @@ struct RobotechRenderer(Movable):
         self.scene.fb.draw_rectangle(cx - 1, cy + 8, 2, 14, 76, 232, 255, 225)
 
         # D. Top Tactical Telemetry & Campaign Mission Header
-        self._draw_hud_panel(14, 10, 892, 36, 0xFFD038, 200)
+        self._draw_hud_panel(14, 10, 916, 36, 0xFFD038, 200)
         self.scene.fb.draw_text(
             sim.mission_title()
             + "  |  WAVE "
             + String(sim.wave)
-            + "  |  HOSTILES: "
-            + String(sim.active_hostile_count())
+            + "  |  "
+            + sim.pilot_callsign()
             + "  |  SCORE: "
             + String(sim.score)
             + "  |  "
@@ -636,15 +865,23 @@ struct RobotechRenderer(Movable):
             255,
             232,
             156,
-            fit=864,
+            fit=890,
         )
 
+        # Live `.flrp` Deterministic Flight Recorder Badge (when active)
+        if self.replay_label.byte_length() > 0:
+            self._draw_hud_panel(938, 10, 162, 36, 0xFF4268, 220)
+            self.scene.fb.draw_text(self.replay_label, 1019, 20, 12, 255, 168, 186, align=1, fit=148)
+        else:
+            self._draw_hud_panel(938, 10, 162, 36, 0x4CE8FF, 190)
+            self.scene.fb.draw_text("[B] BRIEF  [P] PILOT", 1019, 20, 11, 168, 236, 255, align=1, fit=148)
+
         if sim.comms_timer > Float32(0.0):
-            self._draw_hud_panel(cx - 295, 674, 590, 34, 0x4CE8FF, 210)
-            self.scene.fb.draw_text(sim.comms_banner, cx, 683, 13, 156, 242, 255, align=1, fit=564)
+            self._draw_hud_panel(cx - 305, 674, 610, 34, 0x4CE8FF, 210)
+            self.scene.fb.draw_text(sim.comms_banner, cx, 683, 13, 156, 242, 255, align=1, fit=584)
 
         if sim.incoming_missile_count > 0:
-            var warn_y = 88 if sim.boss_active else 54
+            var warn_y = 116 if (sim.boss_active and sim.skimming_hull) else (88 if sim.boss_active else 54)
             self._draw_hud_panel(cx - 240, warn_y, 480, 30, 0xFF2E4C, 225)
             self.scene.fb.draw_text(
                 "WARNING: " + String(sim.incoming_missile_count) + " ZENTRAEDI MISSILES INBOUND — [Q/E] EVADE!",
@@ -705,21 +942,23 @@ struct RobotechRenderer(Movable):
                 var py = rcy - max(-50, min(50, Int(lz)))
                 self.scene.fb.draw_rectangle(px - 1, py - 1, 3, 3, 255, 120, 255, 240)
 
-        # F. Bottom-Left VF-1 Transformation, FAST Packs & SDF-1 Systems Panel
+        # F. Bottom-Left VF-1 Transformation, Squadron Pilot & SDF-1 Storm Attacker Panel
         var bl_y = 584
         var mode_col = UInt32(0x4CE8FF) if sim.mode == MODE_FIGHTER else (UInt32(0xFFD038) if sim.mode == MODE_GUARDIAN else UInt32(0x38FFB0))
         self._draw_hud_panel(14, bl_y, 386, 124, mode_col, 210)
-        var rig_prefix = "SUPER VF-1S: " if sim.fast_packs else "VF-1S MODE: "
+        var rig_prefix = ("SUPER " if sim.fast_packs else "") + sim.pilot_airframe() + ": "
         self.scene.fb.draw_text(
             rig_prefix + sim.mode_name(),
             28,
             bl_y + 10,
-            16,
+            15,
             UInt8((mode_col >> 16) & 255),
             UInt8((mode_col >> 8) & 255),
             UInt8(mode_col & 255),
+            fit=358,
         )
-        self.scene.fb.draw_text("[1-3/TAB] MODE  [G] FAST PACK  [F1] MISSION", 28, bl_y + 31, 11, 162, 192, 222, fit=358)
+        var sdf_tag = "STORM [H:DAEDALUS]" if sim.sdf1_storm_mode else "CRUISER [H:STORM]"
+        self.scene.fb.draw_text("[1-3] MODE  [G] FAST  " + sdf_tag, 28, bl_y + 31, 11, 162, 212, 236, fit=358)
 
         self.scene.fb.draw_text("HULL", 28, bl_y + 50, 11, 220, 232, 246)
         self.scene.fb.draw_rectangle_rounded(104, bl_y + 51, 168, 8, 0.4, 24, 36, 52, 220)
@@ -751,7 +990,8 @@ struct RobotechRenderer(Movable):
         # G. Bottom-Right GU-11 / Strike Cannon, 60-Missile Itano Circus & SDF-1 Reflex Cannon Panel
         var br_x = 880
         self._draw_hud_panel(br_x, bl_y, 386, 124, 0xFF8C38, 210)
-        self.scene.fb.draw_text("ORDNANCE & SDF-1 REFLEX", br_x + 14, bl_y + 10, 16, 255, 186, 88)
+        var bgm_tag = "  [N:BGM]" if self.bgm_on else "  [N:MUTE]"
+        self.scene.fb.draw_text("ORDNANCE & SDF-1" + bgm_tag, br_x + 14, bl_y + 10, 15, 255, 186, 88, fit=358)
         var gun_txt = "RELOADING..." if sim.gun_reload_t > Float32(0.0) else (String(sim.gun_ammo) + "/200")
         var cannon_tag = " + RO-X2A STRIKE" if sim.fast_packs else ""
         self.scene.fb.draw_text("GU-11" + cannon_tag + ": " + gun_txt, br_x + 14, bl_y + 32, 12, 232, 240, 250, fit=358)
@@ -772,9 +1012,13 @@ struct RobotechRenderer(Movable):
 
         var r_ready = sim.reflex_charge >= Float32(100.0)
         var r_label = (
-            "SDF-1 REFLEX CANNON: FIRING!!"
-            if sim.reflex_beam_t > Float32(0.0)
-            else ("SDF-1 REFLEX CANNON [F]: READY!" if r_ready else ("SDF-1 REFLEX [F]: " + String(Int(sim.reflex_charge)) + "%  [F5/F9] SAVE"))
+            "DAEDALUS PINPOINT ATTACK!!"
+            if sim.daedalus_attack_t > Float32(0.0)
+            else (
+                "SDF-1 REFLEX CANNON: FIRING!!"
+                if sim.reflex_beam_t > Float32(0.0)
+                else ("SDF-1 REFLEX [F]: READY!  [F6/F7] REC" if r_ready else ("SDF-1 REFLEX [F]: " + String(Int(sim.reflex_charge)) + "%  [F6/F7] REC"))
+            )
         )
         self.scene.fb.draw_text(
             r_label,
@@ -799,3 +1043,181 @@ struct RobotechRenderer(Movable):
             UInt8(255),
             UInt8(248),
         )
+
+    def _draw_briefing_hud(mut self, sim: RobotechSimWorld):
+        """Renders the Holographic UN Spacy Tactical Mission Briefing & Squadron Pilot Select Cards."""
+        # Top Command Banner
+        self._draw_hud_panel(20, 14, 1240, 46, 0xFFD038, 215)
+        self.scene.fb.draw_text(
+            "UN SPACY TACTICAL BRIEFING  —  CVS-101 PROMETHEUS HANGAR BAY",
+            38,
+            27,
+            17,
+            255,
+            228,
+            118,
+        )
+        self.scene.fb.draw_text(
+            "[SPACE / ENTER / B] SCRAMBLE LAUNCH!   |   " + self.backend_label(),
+            1240,
+            29,
+            13,
+            108,
+            255,
+            204,
+            align=2,
+        )
+
+        # Left Turntable Caption Card (beneath rotating 3D VF-1 + Planar Deck Shadow)
+        self._draw_hud_panel(24, 586, 560, 114, 0x4CE8FF, 205)
+        var rig_name = ("SUPER " if sim.fast_packs else "") + sim.pilot_airframe() + "  —  " + sim.mode_name() + " CONFIG"
+        self.scene.fb.draw_text(rig_name, 42, 600, 16, 116, 238, 255, fit=524)
+        self.scene.fb.draw_text(
+            "PILOT PERK: " + sim.pilot_perk_summary(),
+            42,
+            626,
+            12,
+            255,
+            224,
+            138,
+            fit=524,
+        )
+        self.scene.fb.draw_text(
+            "[1/2/3] INSPECT FIGHTER / GUARDIAN / BATTLOID   [G] TOGGLE FAST PACKS",
+            42,
+            650,
+            11,
+            178,
+            214,
+            242,
+            fit=524,
+        )
+        self.scene.fb.draw_text(
+            "[P] CYCLE SQUADRON PILOT   [F1] CYCLE CAMPAIGN MISSION   [N] BGM",
+            42,
+            672,
+            11,
+            152,
+            242,
+            208,
+            fit=524,
+        )
+
+        # Right-Top Tactical Mission Intel Card
+        var rx = 616
+        self._draw_hud_panel(rx, 76, 644, 244, 0x38FFB8, 215)
+        self.scene.fb.draw_text("ACTIVE OPERATION [F1 TO SELECT]:", rx + 20, 92, 12, 138, 255, 204)
+        self.scene.fb.draw_text(sim.mission_title(), rx + 20, 114, 18, 255, 236, 148, fit=604)
+
+        var obj1 = "PRIMARY: INTERCEPT REGULT RECON PODS & GLAUG OFFICERS OVER SOUTH ATARIA."
+        var obj2 = "ENVIRONMENT: TROPICAL PACIFIC OCEAN + CUMULUS CLOUD DECK (52M ALTITUDE)."
+        var obj3 = "TACTICAL TIP: LOW-ALTITUDE GUARDIAN HOVER [2] EXCELS AT ISLAND SKIMMING!"
+        if sim.theater == THEATER_HIGH_ORBIT:
+            obj1 = "PRIMARY: DEFEND SDF-1 AFTER PLUTO SPACE FOLD AGAINST QUADRONO ACES."
+            obj2 = "ORDNANCE: NP-BP-01 SUPER/STRIKE FAST PACKS ARMED (60 MICRO-MISSILES)."
+            obj3 = "TACTICAL TIP: PRESS [H] TO MORPH SDF-1 INTO HUMANOID STORM ATTACKER!"
+        elif sim.theater == THEATER_BOSS_FLEET:
+            obj1 = "PRIMARY: DESTROY THUVERL-SALAN HEAVY DESTROYER & ESCORT QUADRONO ACES."
+            obj2 = "SUBSYSTEMS: TARGET PORT/STBD TURRETS, TORPEDO BAY & BRIDGE [2X CRIT]!"
+            obj3 = "TACTICAL TIP: SKIM WITHIN 66M OF HULL FOR 1.35X DMG, OR [H] DAEDALUS RAM!"
+
+        self.scene.fb.draw_text(obj1, rx + 20, 150, 12, 224, 240, 252, fit=604)
+        self.scene.fb.draw_text(obj2, rx + 20, 174, 12, 186, 224, 248, fit=604)
+        self.scene.fb.draw_text(obj3, rx + 20, 198, 12, 118, 248, 214, fit=604)
+
+        # Mini theater selector pills
+        for t_i in range(3):
+            var px = rx + 20 + t_i * 204
+            var sel = sim.theater == t_i
+            self.scene.fb.draw_rectangle_rounded(
+                px,
+                232,
+                192,
+                34,
+                0.35,
+                UInt8(42) if sel else UInt8(18),
+                UInt8(108) if sel else UInt8(30),
+                UInt8(96) if sel else UInt8(46),
+                235,
+            )
+            var m_short = "M1: MACROSS ISLAND" if t_i == 0 else ("M2: SPACE FOLD ORBIT" if t_i == 1 else "M3: FLEET DESTROYER")
+            self.scene.fb.draw_text(
+                m_short,
+                px + 96,
+                243,
+                11,
+                UInt8(255) if sel else UInt8(152),
+                UInt8(242) if sel else UInt8(178),
+                UInt8(136) if sel else UInt8(204),
+                align=1,
+                fit=180,
+            )
+        self.scene.fb.draw_text(
+            "WAVE " + String(sim.wave) + "   |   HOSTILES ON RADAR: " + String(sim.active_hostile_count()),
+            rx + 20,
+            284,
+            12,
+            255,
+            196,
+            118,
+        )
+
+        # Right-Bottom Squadron Pilot Roster & Performance Bars Card
+        self._draw_hud_panel(rx, 336, 644, 364, 0xFF8C38, 215)
+        self.scene.fb.draw_text("VERITECH SQUADRON ROSTER [PRESS P TO SELECT]:", rx + 20, 352, 13, 255, 198, 108)
+
+        for p_i in range(3):
+            var card_y = 380 + p_i * 98
+            var active = sim.pilot_id == p_i
+            var bg_r = UInt8(48) if (active and p_i == 2) else (UInt8(28) if active else UInt8(14))
+            var bg_g = UInt8(24) if (active and p_i == 2) else (UInt8(52) if active else UInt8(22))
+            var bg_b = UInt8(42) if (active and p_i == 2) else (UInt8(78) if active else UInt8(34))
+            self.scene.fb.draw_rectangle_rounded(rx + 18, card_y, 608, 86, 0.22, bg_r, bg_g, bg_b, 232)
+            if active:
+                self.scene.fb.draw_rectangle(rx + 18, card_y, 5, 86, 255, 214, 72, 255)
+
+            var p_title = (
+                "ROY FOCKER  —  SKULL LEADER (VF-1S)"
+                if p_i == PILOT_SKULL_LEADER
+                else (
+                    "MAX STERLING  —  BLUE-2 ACE (VF-1J COBALT)"
+                    if p_i == PILOT_MAX_STERLING
+                    else "MIRIYA PARINA  —  RED-1 QUADRONO ACE (VF-1J CRIMSON)"
+                )
+            )
+            var p_perk = (
+                "+35% SDF-1 Reflex Cannon Charge  |  Balanced Command Spec"
+                if p_i == PILOT_SKULL_LEADER
+                else (
+                    "+18% Turn Agility  |  +12% Top Mach Speed & Afterburner"
+                    if p_i == PILOT_MAX_STERLING
+                    else "+22% GU-11 & Strike Cannon ROF  |  +35% Multi-Lock Sweep"
+                )
+            )
+            self.scene.fb.draw_text(
+                ("> " if active else "  ") + p_title,
+                rx + 32,
+                card_y + 10,
+                14,
+                UInt8(255) if active else UInt8(192),
+                UInt8(236) if active else UInt8(208),
+                UInt8(138) if active else UInt8(226),
+                fit=580,
+            )
+            self.scene.fb.draw_text(p_perk, rx + 36, card_y + 32, 11, 168, 228, 250, fit=576)
+
+            # 3 Crisp Performance Stat Bars (AGILITY, FIREPOWER, TACTICAL)
+            var s_agil = 108 if p_i == 0 else (142 if p_i == 1 else 124)
+            var s_fire = 114 if p_i == 0 else (106 if p_i == 1 else 144)
+            var s_tact = 144 if p_i == 0 else (112 if p_i == 1 else 136)
+            self.scene.fb.draw_text("AGIL", rx + 36, card_y + 58, 10, 180, 200, 220)
+            self.scene.fb.draw_rectangle_rounded(rx + 74, card_y + 60, 146, 7, 0.4, 22, 34, 48, 220)
+            self.scene.fb.draw_rectangle_rounded(rx + 74, card_y + 60, s_agil, 7, 0.4, 76, 228, 255, 245)
+
+            self.scene.fb.draw_text("ROF", rx + 234, card_y + 58, 10, 180, 200, 220)
+            self.scene.fb.draw_rectangle_rounded(rx + 266, card_y + 60, 146, 7, 0.4, 22, 34, 48, 220)
+            self.scene.fb.draw_rectangle_rounded(rx + 266, card_y + 60, s_fire, 7, 0.4, 255, 112, 152, 245)
+
+            self.scene.fb.draw_text("SYNC", rx + 426, card_y + 58, 10, 180, 200, 220)
+            self.scene.fb.draw_rectangle_rounded(rx + 464, card_y + 60, 146, 7, 0.4, 22, 34, 48, 220)
+            self.scene.fb.draw_rectangle_rounded(rx + 464, card_y + 60, s_tact, 7, 0.4, 88, 255, 188, 245)

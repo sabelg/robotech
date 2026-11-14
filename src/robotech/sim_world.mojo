@@ -12,7 +12,7 @@ from flint.core.math import Vec3
 from flint.core.jobs import JobPool, default_worker_count
 from flint.core.ecs import ArchetypeRegistry, ArchetypeSlots, SimdColumn, run_parallel_ctx
 from flint.core.springs import SpringFloat, SpringVec3
-from flint.core.serial import BlobWriter, BlobReader, fourcc
+from flint.core.serial import BlobWriter, BlobReader, fourcc, fnv64
 from flint.assets.checkpoint import save_checkpoint_lz4, load_checkpoint_lz4
 from flint.assets.json_write import json_quote
 from flint.physics.filter import CollisionFilter
@@ -21,6 +21,11 @@ from flint.physics.broadphase import BroadphaseInput, find_pairs
 comptime MODE_FIGHTER: Int = 0
 comptime MODE_GUARDIAN: Int = 1
 comptime MODE_BATTLOID: Int = 2
+
+# Playable UN Spacy / Quadrono Squadron Pilots (`[P]`)
+comptime PILOT_SKULL_LEADER: Int = 0
+comptime PILOT_MAX_STERLING: Int = 1
+comptime PILOT_MIRIYA_ACE: Int = 2
 
 # Macross Saga 3-Mission Campaign Theaters
 comptime THEATER_MACROSS_ISLAND: Int = 0
@@ -31,6 +36,13 @@ comptime ENEMY_REGULT: Int = 0
 comptime ENEMY_GLAUG: Int = 1
 comptime ENEMY_QUEADLUUN: Int = 2
 
+# Destructible Thuverl-Salan Heavy Destroyer Subsystems
+comptime SUBSYS_PORT_TURRET: Int = 0
+comptime SUBSYS_STBD_TURRET: Int = 1
+comptime SUBSYS_TORPEDO_BAY: Int = 2
+comptime SUBSYS_BRIDGE: Int = 3
+comptime BOSS_SUBSYS_COUNT: Int = 4
+comptime SUBSYS_TARGET_BASE: Int = 900
 comptime BOSS_TARGET_ID: Int = 999
 
 comptime TEAM_UN_SPACY: Int = 0
@@ -57,6 +69,7 @@ comptime EVT_LOCK: Int = 1 << 2
 comptime EVT_SALVO: Int = 1 << 3
 comptime EVT_EXPLODE: Int = 1 << 4
 comptime EVT_REFLEX: Int = 1 << 5
+comptime EVT_RADIO: Int = 1 << 6
 
 
 @fieldwise_init
@@ -75,6 +88,8 @@ struct PilotControls(Copyable, ImplicitlyCopyable, Movable):
     var request_mode: Int       # -1 = none, 0..2 = mode
     var toggle_fast_packs: Bool
     var fire_reflex_cannon: Bool
+    var toggle_storm_attacker: Bool
+    var cycle_pilot: Bool
     var cycle_mission: Bool
 
     def __init__(out self):
@@ -92,7 +107,73 @@ struct PilotControls(Copyable, ImplicitlyCopyable, Movable):
         self.request_mode = -1
         self.toggle_fast_packs = False
         self.fire_reflex_cannon = False
+        self.toggle_storm_attacker = False
+        self.cycle_pilot = False
         self.cycle_mission = False
+
+
+def encode_pilot_controls(ctrl: PilotControls) -> List[UInt8]:
+    """Bit-exact binary encoding of per-tick `PilotControls` for `.flrp` deterministic flight replays."""
+    var w = BlobWriter()
+    w.f32(ctrl.pitch_in)
+    w.f32(ctrl.yaw_in)
+    w.f32(ctrl.strafe_x)
+    w.f32(ctrl.lift_y)
+    w.f32(ctrl.throttle_in)
+    w.boolean(ctrl.boost_held)
+    w.boolean(ctrl.fire_gunpod)
+    w.boolean(ctrl.lock_held)
+    w.boolean(ctrl.launch_salvo)
+    w.boolean(ctrl.quick_salvo)
+    w.integer(ctrl.barrel_roll_dir)
+    w.integer(ctrl.request_mode)
+    w.boolean(ctrl.toggle_fast_packs)
+    w.boolean(ctrl.fire_reflex_cannon)
+    w.boolean(ctrl.toggle_storm_attacker)
+    w.boolean(ctrl.cycle_pilot)
+    w.boolean(ctrl.cycle_mission)
+    return w.data.copy()
+
+
+def decode_pilot_controls(bytes: List[UInt8]) -> PilotControls:
+    var c = PilotControls()
+    if len(bytes) < 20:
+        return c
+    var r = BlobReader(bytes.copy())
+    c.pitch_in = r.f32()
+    c.yaw_in = r.f32()
+    c.strafe_x = r.f32()
+    c.lift_y = r.f32()
+    c.throttle_in = r.f32()
+    c.boost_held = r.boolean()
+    c.fire_gunpod = r.boolean()
+    c.lock_held = r.boolean()
+    c.launch_salvo = r.boolean()
+    c.quick_salvo = r.boolean()
+    c.barrel_roll_dir = r.integer()
+    c.request_mode = r.integer()
+    c.toggle_fast_packs = r.boolean()
+    c.fire_reflex_cannon = r.boolean()
+    c.toggle_storm_attacker = r.boolean()
+    c.cycle_pilot = r.boolean()
+    c.cycle_mission = r.boolean()
+    return c
+
+
+@fieldwise_init
+struct DestroyerSubsystem(Copyable, ImplicitlyCopyable, Movable):
+    var active: Bool
+    var hp: Float32
+    var max_hp: Float32
+    var local_offset: Vec3
+    var lock_marks: Int
+
+    def __init__(out self, local_offset: Vec3 = Vec3(), max_hp: Float32 = 280.0):
+        self.active = True
+        self.hp = max_hp
+        self.max_hp = max_hp
+        self.local_offset = local_offset
+        self.lock_marks = 0
 
 
 @fieldwise_init
@@ -187,16 +268,20 @@ struct RobotechSimWorld(Movable):
     var spark_slots: ArchetypeSlots
     var pool: JobPool
 
-    # Campaign & SDF-1 Tactical Strike State
+    # Campaign & SDF-1 Tactical Strike / Storm Attacker State
     var theater: Int
     var sdf1_hull: Float32
+    var sdf1_storm_mode: Bool
+    var sdf1_storm_morph: SpringFloat
+    var daedalus_attack_t: Float32
+    var daedalus_cd: Float32
     var reflex_charge: Float32
     var reflex_beam_t: Float32
     var reflex_origin_l: Vec3
     var reflex_origin_r: Vec3
     var reflex_target_pos: Vec3
 
-    # Zentraedi Thuverl-Salan Heavy Destroyer Boss
+    # Zentraedi Thuverl-Salan Heavy Destroyer Boss & 4 Destructible Subsystems
     var boss_active: Bool
     var boss_pos: Vec3
     var boss_vel: Vec3
@@ -207,8 +292,11 @@ struct RobotechSimWorld(Movable):
     var boss_salvo_cd: Float32
     var boss_flash_t: Float32
     var boss_lock_marks: Int
+    var boss_subsystems: List[DestroyerSubsystem]
+    var skimming_hull: Bool
 
-    # Player VF-1S Valkyrie ("SKULL LEADER")
+    # Player VF-1 Valkyrie & Squadron Pilot
+    var pilot_id: Int
     var mode: Int
     var fast_packs: Bool
     var morph_fg: SpringFloat
@@ -321,6 +409,10 @@ struct RobotechSimWorld(Movable):
 
         self.theater = THEATER_MACROSS_ISLAND
         self.sdf1_hull = 100.0
+        self.sdf1_storm_mode = False
+        self.sdf1_storm_morph = SpringFloat(0.0)
+        self.daedalus_attack_t = 0.0
+        self.daedalus_cd = 0.0
         self.reflex_charge = 68.0
         self.reflex_beam_t = 0.0
         self.reflex_origin_l = Vec3(-62.0, 70.0, 210.0)
@@ -337,7 +429,14 @@ struct RobotechSimWorld(Movable):
         self.boss_salvo_cd = 4.5
         self.boss_flash_t = 0.0
         self.boss_lock_marks = 0
+        self.boss_subsystems = List[DestroyerSubsystem]()
+        self.boss_subsystems.append(DestroyerSubsystem(Vec3(-13.8, 2.5, 14.0), 280.0))
+        self.boss_subsystems.append(DestroyerSubsystem(Vec3(13.8, 2.5, 14.0), 280.0))
+        self.boss_subsystems.append(DestroyerSubsystem(Vec3(0.0, -3.5, 28.0), 260.0))
+        self.boss_subsystems.append(DestroyerSubsystem(Vec3(0.0, 10.5, -6.0), 320.0))
+        self.skimming_hull = False
 
+        self.pilot_id = PILOT_SKULL_LEADER
         self.mode = MODE_FIGHTER
         self.fast_packs = False
         self.morph_fg = SpringFloat(0.0)
@@ -463,6 +562,88 @@ struct RobotechSimWorld(Movable):
             return "M2: HIGH ORBIT SDF-1"
         return "M3: ZENTRAEDI FLEET"
 
+    def _set_comms(mut self, banner: String, duration: Float32 = 3.4):
+        if banner != self.comms_banner:
+            self.sound_events |= EVT_RADIO
+        self.comms_banner = banner
+        self.comms_timer = duration
+
+    def pilot_callsign(self) -> String:
+        if self.pilot_id == PILOT_SKULL_LEADER:
+            return "SKULL-1 [ROY/RICK]"
+        if self.pilot_id == PILOT_MAX_STERLING:
+            return "SKULL-2 [MAX ACE]"
+        return "QUADRONO [MIRIYA]"
+
+    def pilot_full_name(self) -> String:
+        if self.pilot_id == PILOT_SKULL_LEADER:
+            return "CDR. ROY FOCKER / LT. RICK HUNTER (VF-1S SKULL-1)"
+        if self.pilot_id == PILOT_MAX_STERLING:
+            return "LT. MAXIMILIAN STERLING (VF-1J COBALT ACE)"
+        return "ACE MIRIYA PARINA STERLING (VF-1J CRIMSON ACE)"
+
+    def pilot_airframe(self) -> String:
+        if self.pilot_id == PILOT_SKULL_LEADER:
+            return "VF-1S"
+        if self.pilot_id == PILOT_MAX_STERLING:
+            return "VF-1J [MAX]"
+        return "VF-1J [MIRIYA]"
+
+    def pilot_perk_summary(self) -> String:
+        if self.pilot_id == PILOT_SKULL_LEADER:
+            return "+30% SDF-1 REFLEX CHARGE  |  BALANCED ALL-THEATER SKULL LEADER"
+        if self.pilot_id == PILOT_MAX_STERLING:
+            return "+18% TURN & ROLL AGILITY  |  +12% MACH SPEED  |  WIDE LEAD ASSIST"
+        return "+22% GU-11 & STRIKE ROF   |  +35% RADAR MULTI-LOCK SWEEP SPEED"
+
+    def set_pilot(mut self, pid: Int):
+        self.pilot_id = max(0, min(2, pid))
+        self.sound_events |= EVT_LOCK
+        self._set_comms("SQUADRON PILOT ACTIVE: " + self.pilot_full_name(), 3.4)
+
+    def cycle_pilot(mut self):
+        self.set_pilot((self.pilot_id + 1) % 3)
+
+    def _reset_boss_subsystems(mut self, scale_hp: Float32 = 1.0):
+        self.boss_subsystems.clear()
+        self.boss_subsystems.append(DestroyerSubsystem(Vec3(-13.8, 2.5, 14.0), Float32(280.0) * scale_hp))
+        self.boss_subsystems.append(DestroyerSubsystem(Vec3(13.8, 2.5, 14.0), Float32(280.0) * scale_hp))
+        self.boss_subsystems.append(DestroyerSubsystem(Vec3(0.0, -3.5, 28.0), Float32(260.0) * scale_hp))
+        self.boss_subsystems.append(DestroyerSubsystem(Vec3(0.0, 10.5, -6.0), Float32(320.0) * scale_hp))
+
+    def boss_subsystem_world_pos(self, idx: Int) -> Vec3:
+        if idx < 0 or idx >= len(self.boss_subsystems):
+            return self.boss_pos
+        var off = self.boss_subsystems[idx].local_offset
+        var cy = cos(self.boss_yaw)
+        var sy = sin(self.boss_yaw)
+        var fwd = Vec3(sy, 0.0, cy)
+        var right = Vec3(-cy, 0.0, sy)
+        return self.boss_pos + right * off.x + Vec3(0.0, off.y, 0.0) + fwd * off.z
+
+    def boss_subsystem_label(self, idx: Int) -> String:
+        if idx == SUBSYS_PORT_TURRET:
+            return "PORT TURRET"
+        if idx == SUBSYS_STBD_TURRET:
+            return "STBD TURRET"
+        if idx == SUBSYS_TORPEDO_BAY:
+            return "TORPEDO BAY"
+        return "BRIDGE [CRIT]"
+
+    def intact_subsystem_count(self) -> Int:
+        if not self.boss_active:
+            return 0
+        var c = 0
+        for i in range(len(self.boss_subsystems)):
+            if self.boss_subsystems[i].active:
+                c += 1
+        return c
+
+    def boss_bridge_destroyed(self) -> Bool:
+        if len(self.boss_subsystems) <= SUBSYS_BRIDGE:
+            return False
+        return not self.boss_subsystems[SUBSYS_BRIDGE].active
+
     def mode_name(self) -> String:
         if self.mode == MODE_FIGHTER:
             return "FIGHTER"
@@ -477,23 +658,21 @@ struct RobotechSimWorld(Movable):
         self.mode = clamped
         self.sound_events |= EVT_TRANSFORM
         if clamped == MODE_FIGHTER:
-            self.comms_banner = "SKULL LEADER: VF-1 TRANSFORM -> FIGHTER INTERCEPT MODE!"
+            self._set_comms(self.pilot_callsign() + ": VF-1 TRANSFORM -> FIGHTER INTERCEPT MODE!", 3.2)
         elif clamped == MODE_GUARDIAN:
-            self.comms_banner = "SKULL LEADER: VF-1 TRANSFORM -> GUARDIAN VTOL HOVER MODE!"
+            self._set_comms(self.pilot_callsign() + ": VF-1 TRANSFORM -> GUARDIAN VTOL HOVER MODE!", 3.2)
         else:
-            self.comms_banner = "SKULL LEADER: VF-1 TRANSFORM -> BATTLOID COMBAT MODE!"
-        self.comms_timer = 3.2
+            self._set_comms(self.pilot_callsign() + ": VF-1 TRANSFORM -> BATTLOID COMBAT MODE!", 3.2)
 
     def toggle_fast_pack_system(mut self):
         self.fast_packs = not self.fast_packs
         self.sound_events |= EVT_TRANSFORM
         if self.fast_packs:
             self.missiles_ready = 60
-            self.comms_banner = "NP-BP-01 SUPER/STRIKE FAST PACKS ARMED (60 MISSILES + RO-X2A CANNON)!"
+            self._set_comms("NP-BP-01 SUPER/STRIKE FAST PACKS ARMED (60 MISSILES + RO-X2A CANNON)!", 3.6)
         else:
             self.missiles_ready = min(self.missiles_ready, 36)
-            self.comms_banner = "SUPER FAST PACKS JETTISONED — CLEAN ATMOSPHERIC AIRFRAME!"
-        self.comms_timer = 3.6
+            self._set_comms("SUPER FAST PACKS JETTISONED — CLEAN ATMOSPHERIC AIRFRAME!", 3.6)
 
     def set_mission(mut self, theater_idx: Int):
         var t = max(0, min(2, theater_idx))
@@ -502,6 +681,10 @@ struct RobotechSimWorld(Movable):
         for b in range(MAX_BOLTS):
             self.bolt_active[b] = False
         self.reflex_beam_t = 0.0
+        self.daedalus_attack_t = 0.0
+        self.daedalus_cd = 0.0
+        self.sdf1_storm_mode = False
+        self.sdf1_storm_morph = SpringFloat(0.0)
         if t == THEATER_MACROSS_ISLAND:
             self.fast_packs = False
             self.missiles_ready = 36
@@ -602,7 +785,8 @@ struct RobotechSimWorld(Movable):
 
         if self.theater == THEATER_BOSS_FLEET:
             self.boss_active = True
-            self.boss_max_hp = Float32(1800.0) + Float32(max(0, wave_num - 5)) * Float32(400.0)
+            var hp_scale = Float32(1.0) + Float32(max(0, wave_num - 5)) * Float32(0.22)
+            self.boss_max_hp = Float32(1800.0) * hp_scale
             self.boss_hp = self.boss_max_hp
             self.boss_pos = self.pos + fwd * Float32(178.0) + right * Float32(26.0) + Vec3(0.0, 28.0, 0.0)
             self.boss_vel = Vec3()
@@ -610,28 +794,33 @@ struct RobotechSimWorld(Movable):
             self.boss_fire_cd = Float32(1.8)
             self.boss_salvo_cd = Float32(4.2)
             self.boss_flash_t = Float32(0.0)
-            self.comms_banner = (
-                "ALERT: ZENTRAEDI THUVERL-SALAN DESTROYER & MIRIYA'S QUADRONO ACES WARPING IN!"
+            self._reset_boss_subsystems(hp_scale)
+            self._set_comms(
+                "ALERT: ZENTRAEDI THUVERL-SALAN DESTROYER (4 SUBSYSTEMS) & QUADRONO ACES WARPING IN!",
+                4.6,
             )
         elif self.theater == THEATER_HIGH_ORBIT:
             self.boss_active = False
             self.boss_hp = 0.0
-            self.comms_banner = (
+            self.skimming_hull = False
+            self._set_comms(
                 "SPACE FOLD COMPLETE — WAVE "
                 + String(wave_num)
-                + " HIGH ORBIT DEFENSE (FAST PACKS + QUEADLUUN ACES)!"
+                + " HIGH ORBIT DEFENSE (FAST PACKS + QUEADLUUN ACES)!",
+                4.6,
             )
         else:
             self.boss_active = False
             self.boss_hp = 0.0
-            self.comms_banner = (
+            self.skimming_hull = False
+            self._set_comms(
                 "MACROSS ISLAND RADAR: ZENTRAEDI WAVE "
                 + String(wave_num)
                 + " INBOUND ("
                 + String(pod_count)
-                + " HOSTILES)!"
+                + " HOSTILES)!",
+                4.6,
             )
-        self.comms_timer = 4.6
 
     def active_enemy_count(self) -> Int:
         var n = 0
@@ -691,17 +880,25 @@ struct RobotechSimWorld(Movable):
                 for _ in range(self.enemies[i].lock_marks):
                     targets.append(i)
                 self.enemies[i].lock_marks = 0
-        if self.boss_active and self.boss_lock_marks > 0:
-            for _ in range(self.boss_lock_marks):
-                targets.append(BOSS_TARGET_ID)
-            self.boss_lock_marks = 0
+        if self.boss_active:
+            for s in range(len(self.boss_subsystems)):
+                if self.boss_subsystems[s].active and self.boss_subsystems[s].lock_marks > 0:
+                    for _ in range(self.boss_subsystems[s].lock_marks):
+                        targets.append(SUBSYS_TARGET_BASE + s)
+                    self.boss_subsystems[s].lock_marks = 0
+            if self.boss_lock_marks > 0:
+                for _ in range(self.boss_lock_marks):
+                    targets.append(BOSS_TARGET_ID)
+                self.boss_lock_marks = 0
         self.total_locks = 0
 
-        # If quick-fired without pre-locking, distribute across all enemies & Destroyer boss in forward hemisphere
+        # If quick-fired without pre-locking, distribute across all enemies, Destroyer subsystems & boss in forward hemisphere
         if len(targets) == 0:
             var fwd = self.forward_vec()
             if self.boss_active and (self.boss_pos - self.pos).normalized().dot(fwd) > Float32(0.10):
-                targets.append(BOSS_TARGET_ID)
+                for s in range(len(self.boss_subsystems)):
+                    if self.boss_subsystems[s].active:
+                        targets.append(SUBSYS_TARGET_BASE + s)
                 targets.append(BOSS_TARGET_ID)
             for i in range(MAX_ENEMIES):
                 if self.enemies[i].active:
@@ -736,8 +933,69 @@ struct RobotechSimWorld(Movable):
 
         self.missiles_ready -= count
         self.sound_events |= EVT_SALVO
-        self.comms_banner = "FOX THREE! ITANO CIRCUS SALVO (" + String(count) + " MICRO-MISSILES) AWAY!"
-        self.comms_timer = 2.8
+        self._set_comms("FOX THREE! ITANO CIRCUS SALVO (" + String(count) + " MICRO-MISSILES) AWAY!", 2.8)
+
+    def _execute_daedalus_attack(mut self):
+        """Unleashes the iconic SLV-111 Daedalus Pinpoint-Barrier ram & interior missile saturation burst!"""
+        self.daedalus_attack_t = Float32(2.3)
+        self.daedalus_cd = Float32(7.0)
+        self.cam_shake = Float32(2.5)
+        self.sound_events |= EVT_EXPLODE | EVT_SALVO
+
+        var ram_origin = Vec3(
+            self.pos.x * Float32(0.25) - Float32(92.0),
+            Float32(78.0),
+            self.pos.z + Float32(118.0),
+        )
+        var tgt = self.boss_pos if self.boss_active else (self.pos + self.forward_vec() * Float32(145.0))
+        if self.boss_active:
+            for s in range(len(self.boss_subsystems)):
+                if self.boss_subsystems[s].active:
+                    var spos = self.boss_subsystem_world_pos(s)
+                    self._damage_boss_subsystem(s, Float32(190.0), spos)
+                    break
+            var bp = self.boss_pos
+            self._damage_boss(Float32(460.0), bp)
+            self.emit_explosion(bp, 64, 48.0)
+
+        # Launch 16 internal Daedalus ramp micro-missiles!
+        var burst_dir = (tgt - ram_origin).normalized()
+        for k in range(16):
+            var ang = Float32(k) * Float32(0.3927)
+            var spread = Vec3(cos(ang) * Float32(18.0), sin(ang) * Float32(18.0) + Float32(6.0), 0.0)
+            var tid = BOSS_TARGET_ID if self.boss_active else (k % max(1, MAX_ENEMIES))
+            if not self.boss_active:
+                tid = -1
+                for ei in range(MAX_ENEMIES):
+                    var cand = (ei + k) % MAX_ENEMIES
+                    if self.enemies[cand].active:
+                        tid = cand
+                        break
+            if tid >= 0:
+                self.spawn_micro_missile(ram_origin, burst_dir * Float32(68.0) + spread, TEAM_UN_SPACY, tid)
+
+        self._set_comms(
+            "CLAUDIA GRANT: SDF-1 STORM ATTACKER — DAEDALUS PINPOINT BARRIER ATTACK!!",
+            4.2,
+        )
+
+    def trigger_storm_daedalus(mut self) -> Bool:
+        """Transforms SDF-1 between Cruiser & towering humanoid Storm Attacker, or triggers the Daedalus Attack!"""
+        if not self.sdf1_storm_mode:
+            self.sdf1_storm_mode = True
+            self.sound_events |= EVT_TRANSFORM
+            self._set_comms(
+                "CAPTAIN GLOVAL: SDF-1 MODULAR TRANSFORMATION — STORM ATTACKER MODE ENGAGED!",
+                3.8,
+            )
+            return True
+        if self.active_hostile_count() > 0 and self.daedalus_cd <= Float32(0.0):
+            self._execute_daedalus_attack()
+            return True
+        self.sdf1_storm_mode = False
+        self.sound_events |= EVT_TRANSFORM
+        self._set_comms("CAPTAIN GLOVAL: SDF-1 RETURNING TO FORTRESS CRUISER CONFIGURATION.", 3.2)
+        return True
 
     def trigger_reflex_cannon(mut self) -> Bool:
         """Unleashes SDF-1 Macross's twin Main Boom Reflex Cannons across the combat sector."""
@@ -793,8 +1051,11 @@ struct RobotechSimWorld(Movable):
                 var epos = self.enemies[i].pos
                 self._damage_enemy(i, Float32(340.0), epos)
 
-        self.comms_banner = "CAPTAIN GLOVAL: SDF-1 MAIN REFLEX CANNON — CONVERGING BEAM FIRE!!"
-        self.comms_timer = 4.2
+        var mode_tag = "STORM ATTACKER " if self.sdf1_storm_morph.value > Float32(0.5) else ""
+        self._set_comms(
+            "CAPTAIN GLOVAL: SDF-1 " + mode_tag + "MAIN REFLEX CANNON — CONVERGING BEAM FIRE!!",
+            4.2,
+        )
         return True
 
     def nearest_reticle_enemy(self, min_dot: Float32 = 0.88) -> Int:
@@ -817,10 +1078,20 @@ struct RobotechSimWorld(Movable):
             self.comms_timer = max(Float32(0.0), self.comms_timer - dt)
         if self.cam_shake > Float32(0.0):
             self.cam_shake = max(Float32(0.0), self.cam_shake - dt * Float32(3.8))
+        if self.daedalus_attack_t > Float32(0.0):
+            self.daedalus_attack_t = max(Float32(0.0), self.daedalus_attack_t - dt)
+        if self.daedalus_cd > Float32(0.0):
+            self.daedalus_cd = max(Float32(0.0), self.daedalus_cd - dt)
+
+        # Squadron Pilot Perks + Hull Trench Skimming Bonus
+        var reflex_rate = Float32(6.8) if self.pilot_id == PILOT_SKULL_LEADER else Float32(5.2)
+        self.skimming_hull = self.boss_active and (self.pos - self.boss_pos).length() < Float32(66.0)
+        if self.skimming_hull:
+            reflex_rate += Float32(7.5)
         if self.reflex_beam_t > Float32(0.0):
             self.reflex_beam_t = max(Float32(0.0), self.reflex_beam_t - dt)
         else:
-            self.reflex_charge = min(Float32(100.0), self.reflex_charge + dt * Float32(5.2))
+            self.reflex_charge = min(Float32(100.0), self.reflex_charge + dt * reflex_rate)
 
         for fi in range(MAX_FIREBALLS):
             if self.fireballs[fi].active:
@@ -828,13 +1099,19 @@ struct RobotechSimWorld(Movable):
                 if self.fireballs[fi].life <= Float32(0.0):
                     self.fireballs[fi].active = False
 
-        # 0. Campaign Theater Cycling, Super/Strike FAST Pack Toggle & SDF-1 Reflex Cannon
+        # 0. Campaign Theater, Squadron Pilot, FAST Packs, Storm Attacker / Daedalus & Reflex Cannon
         if ctrl.cycle_mission:
             self.set_mission((self.theater + 1) % 3)
+        if ctrl.cycle_pilot:
+            self.cycle_pilot()
         if ctrl.toggle_fast_packs:
             self.toggle_fast_pack_system()
+        if ctrl.toggle_storm_attacker:
+            _ = self.trigger_storm_daedalus()
         if ctrl.fire_reflex_cannon:
             _ = self.trigger_reflex_cannon()
+
+        self.sdf1_storm_morph.update(Float32(1.0) if self.sdf1_storm_mode else Float32(0.0), Float32(0.28), dt)
 
         # 1. Mode Switch & Smooth VF-1 Transformation Springs
         if ctrl.request_mode >= 0:
@@ -844,8 +1121,12 @@ struct RobotechSimWorld(Movable):
         self.morph_fg.update(goal_fg, Float32(0.14), dt)
         self.morph_gb.update(goal_gb, Float32(0.14), dt)
 
-        # 2. Mode-Specific Veritech Flight / VTOL / Battloid Thruster Physics
-        var turn_rate = Float32(1.55) if self.mode == MODE_FIGHTER else (Float32(2.15) if self.mode == MODE_GUARDIAN else Float32(2.65))
+        # 2. Mode-Specific Veritech Flight / VTOL / Battloid Thruster Physics (+ Max Sterling Agility/Speed Perk!)
+        var turn_mult = Float32(1.18) if self.pilot_id == PILOT_MAX_STERLING else Float32(1.0)
+        var spd_mult = Float32(1.12) if self.pilot_id == PILOT_MAX_STERLING else Float32(1.0)
+        var turn_rate = (
+            Float32(1.55) if self.mode == MODE_FIGHTER else (Float32(2.15) if self.mode == MODE_GUARDIAN else Float32(2.65))
+        ) * turn_mult
         self.yaw += ctrl.yaw_in * turn_rate * dt
         self.pitch = max(Float32(-1.05), min(Float32(1.05), self.pitch + ctrl.pitch_in * turn_rate * Float32(0.85) * dt))
 
@@ -874,16 +1155,16 @@ struct RobotechSimWorld(Movable):
             self.boost_fuel = min(Float32(100.0), self.boost_fuel + dt * Float32(15.0))
 
         if self.mode == MODE_FIGHTER:
-            var cruise = Float32(72.0) if self.fast_packs else Float32(62.0)
+            var cruise = (Float32(72.0) if self.fast_packs else Float32(62.0)) * spd_mult
             var base_spd = cruise + ctrl.throttle_in * Float32(26.0)
             if boosting:
-                base_spd = Float32(126.0) if self.fast_packs else Float32(104.0)
+                base_spd = (Float32(126.0) if self.fast_packs else Float32(104.0)) * spd_mult
             var target_vel = fwd * max(Float32(34.0), base_spd)
             if self.barrel_roll_t > Float32(0.0):
                 target_vel = target_vel + right * (self.barrel_roll_dir * Float32(38.0))
             self.vel = self.vel + (target_vel - self.vel) * min(Float32(1.0), dt * Float32(5.5))
         elif self.mode == MODE_GUARDIAN:
-            var spd = (Float32(56.0) if self.fast_packs else Float32(48.0)) if not boosting else (Float32(88.0) if self.fast_packs else Float32(72.0))
+            var spd = ((Float32(56.0) if self.fast_packs else Float32(48.0)) if not boosting else (Float32(88.0) if self.fast_packs else Float32(72.0))) * spd_mult
             var hover_vel = (
                 fwd * (ctrl.throttle_in * spd)
                 + right * (ctrl.strafe_x * spd * Float32(0.95))
@@ -892,7 +1173,7 @@ struct RobotechSimWorld(Movable):
             self.vel = self.vel + (hover_vel - self.vel) * min(Float32(1.0), dt * Float32(6.5))
         else:
             # Battloid 360-degree omni-thruster combat + Pinpoint Barrier Shield on SHIFT
-            var spd = Float32(42.0) if self.fast_packs else Float32(36.0)
+            var spd = (Float32(42.0) if self.fast_packs else Float32(36.0)) * spd_mult
             var omni_vel = (
                 fwd * (ctrl.throttle_in * spd)
                 + right * (ctrl.strafe_x * spd)
@@ -943,17 +1224,31 @@ struct RobotechSimWorld(Movable):
                 self.gun_ammo = 200
 
         var aim_dir = fwd
-        var assist_id = self.nearest_reticle_enemy(0.955)
+        var assist_cone = Float32(0.925) if self.pilot_id == PILOT_MAX_STERLING else Float32(0.955)
+        var assist_id = self.nearest_reticle_enemy(assist_cone)
         if assist_id >= 0:
             var lead_pos = self.enemies[assist_id].pos + self.enemies[assist_id].vel * (
                 (self.enemies[assist_id].pos - self.pos).length() / Float32(260.0)
             )
             aim_dir = (lead_pos - self.pos).normalized()
-        elif self.boss_active and (self.boss_pos - self.pos).normalized().dot(fwd) > Float32(0.92):
-            aim_dir = (self.boss_pos - self.pos).normalized()
+        elif self.boss_active:
+            var best_sub = -1
+            var best_sub_d = Float32(0.90)
+            for s in range(len(self.boss_subsystems)):
+                if self.boss_subsystems[s].active:
+                    var sp = self.boss_subsystem_world_pos(s)
+                    var d = (sp - self.pos).normalized().dot(fwd)
+                    if d > best_sub_d:
+                        best_sub_d = d
+                        best_sub = s
+            if best_sub >= 0:
+                aim_dir = (self.boss_subsystem_world_pos(best_sub) - self.pos).normalized()
+            elif (self.boss_pos - self.pos).normalized().dot(fwd) > Float32(0.92):
+                aim_dir = (self.boss_pos - self.pos).normalized()
 
+        var rof_scale = Float32(0.78) if self.pilot_id == PILOT_MIRIYA_ACE else Float32(1.0)
         if ctrl.fire_gunpod and self.gun_cd <= Float32(0.0) and self.gun_ammo > 0:
-            var rof = Float32(0.055) if self.mode == MODE_BATTLOID else Float32(0.078)
+            var rof = (Float32(0.055) if self.mode == MODE_BATTLOID else Float32(0.078)) * rof_scale
             self.gun_cd = rof
             self.gun_flash_t = Float32(0.045)
             self.gun_ammo -= 1
@@ -964,7 +1259,7 @@ struct RobotechSimWorld(Movable):
 
         # Dorsal Starboard RO-X2A Dual-Barrel Strike Beam Cannon when Super/Strike FAST Packs are equipped!
         if ctrl.fire_gunpod and self.fast_packs and self.strike_cd <= Float32(0.0):
-            self.strike_cd = Float32(0.16)
+            self.strike_cd = Float32(0.16) * rof_scale
             self.strike_flash_t = Float32(0.075)
             var s_origin = self.pos + right * Float32(0.48) + up * Float32(0.84) + fwd * Float32(2.1)
             self.spawn_bolt(s_origin - right * Float32(0.08), self.vel + aim_dir * Float32(315.0), TEAM_UN_SPACY, Float32(1.5), BOLT_UN_STRIKE_BEAM)
@@ -979,10 +1274,11 @@ struct RobotechSimWorld(Movable):
                 self.missile_regen_t = 0.0
                 self.missiles_ready += 1
 
+        var sweep_period = Float32(0.046) if self.pilot_id == PILOT_MIRIYA_ACE else Float32(0.070)
         var lock_limit = min(36 if self.fast_packs else 24, self.missiles_ready)
         if ctrl.lock_held and self.missiles_ready > 0:
             self.lock_sweep_t += dt
-            if self.lock_sweep_t >= Float32(0.070) and self.total_locks < lock_limit:
+            if self.lock_sweep_t >= sweep_period and self.total_locks < lock_limit:
                 self.lock_sweep_t = 0.0
                 var painted = False
                 for i in range(MAX_ENEMIES):
@@ -995,6 +1291,17 @@ struct RobotechSimWorld(Movable):
                             self.sound_events |= EVT_LOCK
                             painted = True
                             break
+                if not painted and self.boss_active:
+                    for s in range(len(self.boss_subsystems)):
+                        var sidx = (self.tick_count + s) % len(self.boss_subsystems)
+                        if self.boss_subsystems[sidx].active and self.boss_subsystems[sidx].lock_marks < 3:
+                            var sp = self.boss_subsystem_world_pos(sidx)
+                            if (sp - self.pos).normalized().dot(fwd) > Float32(0.62):
+                                self.boss_subsystems[sidx].lock_marks += 1
+                                self.total_locks += 1
+                                self.sound_events |= EVT_LOCK
+                                painted = True
+                                break
                 if not painted and self.boss_active and self.boss_lock_marks < 8:
                     var db = (self.boss_pos - self.pos).normalized().dot(fwd)
                     if db > Float32(0.60):
@@ -1114,22 +1421,32 @@ struct RobotechSimWorld(Movable):
             self.boss_fire_cd -= dt
             if self.boss_fire_cd <= Float32(0.0):
                 self.boss_fire_cd = Float32(2.15)
-                self.boss_flash_t = Float32(0.28)
-                self.spawn_bolt(self.boss_pos + b_dir * Float32(46.0) + Vec3(-6.0, 2.0, 0.0), b_dir * Float32(168.0), TEAM_ZENTRAEDI, Float32(2.4), BOLT_BOSS_HEAVY)
-                self.spawn_bolt(self.boss_pos + b_dir * Float32(46.0) + Vec3(6.0, 2.0, 0.0), b_dir * Float32(168.0), TEAM_ZENTRAEDI, Float32(2.4), BOLT_BOSS_HEAVY)
-                # Capital-ship bombardment chips SDF-1 hull until Destroyer is eliminated!
-                self.sdf1_hull = max(Float32(15.0), self.sdf1_hull - Float32(1.2))
+                var turrets_fired = 0
+                if self.boss_subsystems[SUBSYS_PORT_TURRET].active:
+                    var p_muz = self.boss_subsystem_world_pos(SUBSYS_PORT_TURRET) + b_dir * Float32(6.0)
+                    self.spawn_bolt(p_muz, b_dir * Float32(168.0), TEAM_ZENTRAEDI, Float32(2.4), BOLT_BOSS_HEAVY)
+                    turrets_fired += 1
+                if self.boss_subsystems[SUBSYS_STBD_TURRET].active:
+                    var s_muz = self.boss_subsystem_world_pos(SUBSYS_STBD_TURRET) + b_dir * Float32(6.0)
+                    self.spawn_bolt(s_muz, b_dir * Float32(168.0), TEAM_ZENTRAEDI, Float32(2.4), BOLT_BOSS_HEAVY)
+                    turrets_fired += 1
+                if turrets_fired > 0:
+                    self.boss_flash_t = Float32(0.28)
+                    # Capital-ship bombardment chips SDF-1 hull until turrets or Destroyer are eliminated!
+                    self.sdf1_hull = max(Float32(15.0), self.sdf1_hull - Float32(0.6) * Float32(turrets_fired))
 
             self.boss_salvo_cd -= dt
             if self.boss_salvo_cd <= Float32(0.0) and b_dist < Float32(310.0):
                 self.boss_salvo_cd = Float32(5.4)
-                for k in range(4):
-                    var sx = Float32(-12.0) + Float32(k) * Float32(8.0)
-                    self.spawn_micro_missile(
-                        self.boss_pos + Vec3(sx, 8.0, 0.0),
-                        b_dir * Float32(42.0) + Vec3(sx * Float32(0.8), 22.0, 0.0),
-                        TEAM_ZENTRAEDI, 0,
-                    )
+                if self.boss_subsystems[SUBSYS_TORPEDO_BAY].active:
+                    var bay_pos = self.boss_subsystem_world_pos(SUBSYS_TORPEDO_BAY)
+                    for k in range(4):
+                        var sx = Float32(-9.0) + Float32(k) * Float32(6.0)
+                        self.spawn_micro_missile(
+                            bay_pos + Vec3(sx, 2.0, 0.0),
+                            b_dir * Float32(42.0) + Vec3(sx * Float32(0.8), 22.0, 0.0),
+                            TEAM_ZENTRAEDI, 0,
+                        )
 
         # 6. Step Itano Circus Corkscrew Micro-Missiles
         self.incoming_missile_count = 0
@@ -1158,7 +1475,14 @@ struct RobotechSimWorld(Movable):
             var has_goal = False
             var goal_pos = Vec3()
             if self.mis_team[m] == TEAM_UN_SPACY:
-                if tid == BOSS_TARGET_ID and self.boss_active:
+                if tid >= SUBSYS_TARGET_BASE and tid < SUBSYS_TARGET_BASE + BOSS_SUBSYS_COUNT and self.boss_active:
+                    var sidx = tid - SUBSYS_TARGET_BASE
+                    if self.boss_subsystems[sidx].active:
+                        goal_pos = self.boss_subsystem_world_pos(sidx) + self.boss_vel * Float32(0.18)
+                    else:
+                        goal_pos = self.boss_pos + self.boss_vel * Float32(0.20)
+                    has_goal = True
+                elif tid == BOSS_TARGET_ID and self.boss_active:
                     goal_pos = self.boss_pos + self.boss_vel * Float32(0.20)
                     has_goal = True
                 elif tid >= 0 and tid < MAX_ENEMIES and self.enemies[tid].active:
@@ -1258,6 +1582,8 @@ struct RobotechSimWorld(Movable):
     def _resolve_combat_collisions(mut self):
         var bp = BroadphaseInput()
         var filt = CollisionFilter()
+        var skim_mult = Float32(1.35) if self.skimming_hull else Float32(1.0)
+
         # Row 0: Player VF-1
         bp.add(self.pos - Vec3(3.2, 3.2, 3.2), self.pos + Vec3(3.2, 3.2, 3.2), True, True, filt)
         # Rows 1..MAX_ENEMIES: Zentraedi Mecha
@@ -1276,7 +1602,14 @@ struct RobotechSimWorld(Movable):
             filt,
         )
 
-        var mis_base = boss_row + 1
+        # Rows `sub_base .. sub_base + BOSS_SUBSYS_COUNT`: Destructible Warship Subsystems
+        var sub_base = boss_row + 1
+        for s in range(BOSS_SUBSYS_COUNT):
+            var sp = self.boss_subsystem_world_pos(s)
+            var s_act = self.boss_active and s < len(self.boss_subsystems) and self.boss_subsystems[s].active
+            bp.add(sp - Vec3(7.5, 7.5, 7.5), sp + Vec3(7.5, 7.5, 7.5), s_act, True, filt)
+
+        var mis_base = sub_base + BOSS_SUBSYS_COUNT
         for m in range(MAX_MISSILES):
             var mp = Vec3(self.mis_x.get(m), self.mis_y.get(m), self.mis_z.get(m))
             bp.add(mp - Vec3(2.2, 2.2, 2.2), mp + Vec3(2.2, 2.2, 2.2), self.mis_active[m], True, filt)
@@ -1314,13 +1647,38 @@ struct RobotechSimWorld(Movable):
                     var mid = b - mis_base
                     if self.mis_active[mid] and self.mis_team[mid] == TEAM_UN_SPACY:
                         self.mis_active[mid] = False
-                        self._damage_enemy(eid, Float32(34.0), Vec3(self.mis_x.get(mid), self.mis_y.get(mid), self.mis_z.get(mid)))
+                        self._damage_enemy(eid, Float32(34.0) * skim_mult, Vec3(self.mis_x.get(mid), self.mis_y.get(mid), self.mis_z.get(mid)))
                 elif b >= bolt_base:
                     var bid = b - bolt_base
                     if self.bolt_active[bid] and self.bolt_team[bid] == TEAM_UN_SPACY:
                         self.bolt_active[bid] = False
-                        var bdmg = Float32(28.0) if self.bolt_kind[bid] == BOLT_UN_STRIKE_BEAM else Float32(19.0)
+                        var bdmg = (Float32(28.0) if self.bolt_kind[bid] == BOLT_UN_STRIKE_BEAM else Float32(19.0)) * skim_mult
                         self._damage_enemy(eid, bdmg, Vec3(self.bolt_x.get(bid), self.bolt_y.get(bid), self.bolt_z.get(bid)))
+
+            # Destructible Destroyer Subsystem (`sub_base .. mis_base - 1`) vs UN Spacy Missile / Bolt
+            # Checked before main hull so targeted subsystem hits register cleanly!
+            elif a >= sub_base and a < mis_base and self.boss_active:
+                var sid = a - sub_base
+                if sid < len(self.boss_subsystems) and self.boss_subsystems[sid].active:
+                    if b >= mis_base and b < bolt_base:
+                        var mid = b - mis_base
+                        if self.mis_active[mid] and self.mis_team[mid] == TEAM_UN_SPACY:
+                            self.mis_active[mid] = False
+                            self._damage_boss_subsystem(
+                                sid,
+                                Float32(42.0) * skim_mult,
+                                Vec3(self.mis_x.get(mid), self.mis_y.get(mid), self.mis_z.get(mid)),
+                            )
+                    elif b >= bolt_base:
+                        var bid = b - bolt_base
+                        if self.bolt_active[bid] and self.bolt_team[bid] == TEAM_UN_SPACY:
+                            self.bolt_active[bid] = False
+                            var bdmg = (Float32(34.0) if self.bolt_kind[bid] == BOLT_UN_STRIKE_BEAM else Float32(24.0)) * skim_mult
+                            self._damage_boss_subsystem(
+                                sid,
+                                bdmg,
+                                Vec3(self.bolt_x.get(bid), self.bolt_y.get(bid), self.bolt_z.get(bid)),
+                            )
 
             # Thuverl-Salan Destroyer Boss (`boss_row`) vs UN Spacy Missile / Bolt
             elif a == boss_row and self.boss_active:
@@ -1328,12 +1686,12 @@ struct RobotechSimWorld(Movable):
                     var mid = b - mis_base
                     if self.mis_active[mid] and self.mis_team[mid] == TEAM_UN_SPACY:
                         self.mis_active[mid] = False
-                        self._damage_boss(Float32(34.0), Vec3(self.mis_x.get(mid), self.mis_y.get(mid), self.mis_z.get(mid)))
+                        self._damage_boss(Float32(34.0) * skim_mult, Vec3(self.mis_x.get(mid), self.mis_y.get(mid), self.mis_z.get(mid)))
                 elif b >= bolt_base:
                     var bid = b - bolt_base
                     if self.bolt_active[bid] and self.bolt_team[bid] == TEAM_UN_SPACY:
                         self.bolt_active[bid] = False
-                        var bdmg = Float32(28.0) if self.bolt_kind[bid] == BOLT_UN_STRIKE_BEAM else Float32(19.0)
+                        var bdmg = (Float32(28.0) if self.bolt_kind[bid] == BOLT_UN_STRIKE_BEAM else Float32(19.0)) * skim_mult
                         self._damage_boss(bdmg, Vec3(self.bolt_x.get(bid), self.bolt_y.get(bid), self.bolt_z.get(bid)))
 
             # Gunpod / Strike Cannon shooting down incoming Zentraedi missiles in mid-air!
@@ -1356,8 +1714,7 @@ struct RobotechSimWorld(Movable):
         self.hull = max(Float32(10.0), self.hull - mitigated)  # Simulator safety floor keeps session continuous
         self.emit_explosion(hit_pos, 16, 20.0)
         if self.hull <= Float32(25.0):
-            self.comms_banner = "WARNING: VERITECH HULL CRITICAL — DEPLOY PINPOINT BARRIER [3 + SHIFT]!"
-            self.comms_timer = 3.0
+            self._set_comms("WARNING: VERITECH HULL CRITICAL — DEPLOY PINPOINT BARRIER [3 + SHIFT]!", 3.0)
 
     def _damage_enemy(mut self, eid: Int, amount: Float32, hit_pos: Vec3):
         self.enemies[eid].hp -= amount
@@ -1372,35 +1729,58 @@ struct RobotechSimWorld(Movable):
             self.reflex_charge = min(Float32(100.0), self.reflex_charge + Float32(14.0))
             self.emit_explosion(pos, 60 if kind != ENEMY_REGULT else 36, 40.0)
             if kind == ENEMY_QUEADLUUN:
-                self.comms_banner = "SPLASH ONE QUEADLUUN-RAU QUADRONO ACE! (+750 PTS)"
-                self.comms_timer = 3.2
+                self._set_comms("SPLASH ONE QUEADLUUN-RAU QUADRONO ACE! (+750 PTS)", 3.2)
             elif kind == ENEMY_GLAUG:
-                self.comms_banner = "SPLASH ONE ZENTRAEDI GLAUG OFFICER POD! (+500 PTS)"
-                self.comms_timer = 3.0
+                self._set_comms("SPLASH ONE ZENTRAEDI GLAUG OFFICER POD! (+500 PTS)", 3.0)
+
+    def _damage_boss_subsystem(mut self, sub_idx: Int, amount: Float32, hit_pos: Vec3):
+        if not self.boss_active or sub_idx < 0 or sub_idx >= len(self.boss_subsystems):
+            return
+        if not self.boss_subsystems[sub_idx].active:
+            self._damage_boss(amount, hit_pos)
+            return
+        self.boss_subsystems[sub_idx].hp -= amount
+        self.emit_explosion(hit_pos, 20, 24.0)
+        self._damage_boss(amount * Float32(0.35), hit_pos)
+        if self.boss_active and self.boss_subsystems[sub_idx].hp <= Float32(0.0):
+            self.boss_subsystems[sub_idx].active = False
+            self.boss_subsystems[sub_idx].hp = Float32(0.0)
+            self.boss_subsystems[sub_idx].lock_marks = 0
+            self.score += 400
+            self.reflex_charge = min(Float32(100.0), self.reflex_charge + Float32(20.0))
+            self.emit_explosion(self.boss_subsystem_world_pos(sub_idx), 52, 42.0)
+            if sub_idx == SUBSYS_BRIDGE:
+                self._set_comms("COMMAND BRIDGE DESTROYED — 2X CRITICAL DAMAGE EXPOSED ON DESTROYER HULL! (+400 PTS)", 4.2)
+            elif sub_idx == SUBSYS_TORPEDO_BAY:
+                self._set_comms("DESTROYER TORPEDO BAY SILENCED — ENEMY MISSILE SALVOS HALTED! (+400 PTS)", 3.6)
+            else:
+                self._set_comms(self.boss_subsystem_label(sub_idx) + " PLASMA BATTERY DESTROYED! (+400 PTS)", 3.4)
 
     def _damage_boss(mut self, amount: Float32, hit_pos: Vec3):
         if not self.boss_active:
             return
-        self.boss_hp -= amount
+        var crit_mult = Float32(2.0) if self.boss_bridge_destroyed() else Float32(1.0)
+        self.boss_hp -= amount * crit_mult
         self.emit_explosion(hit_pos, 22, 26.0)
         if self.boss_hp <= Float32(0.0):
             var bpos = self.boss_pos
             self.boss_active = False
             self.boss_hp = Float32(0.0)
+            for s in range(len(self.boss_subsystems)):
+                self.boss_subsystems[s].active = False
             self.kills += 1
             self.score += 2500
             self.reflex_charge = min(Float32(100.0), self.reflex_charge + Float32(35.0))
             for k in range(5):
                 var off = Vec3(Float32(k - 2) * Float32(8.5), Float32((k & 1) * 4 - 2), Float32(k - 2) * Float32(14.0))
                 self.emit_explosion(bpos + off, 68, 52.0)
-            self.comms_banner = "DIRECT HIT! ZENTRAEDI THUVERL-SALAN DESTROYER VAPORIZED! (+2500 PTS)"
-            self.comms_timer = 4.5
+            self._set_comms("DIRECT HIT! ZENTRAEDI THUVERL-SALAN DESTROYER VAPORIZED! (+2500 PTS)", 4.5)
 
     # ------------------------------------------------------------------
-    # LZ4 Binary State Checkpoints & Flint MCP Telemetry
+    # LZ4 Binary State Checkpoints, Deterministic Hash & Flint MCP Telemetry
     # ------------------------------------------------------------------
     def serialize_state(self, mut w: BlobWriter):
-        w.begin(fourcc("RBTC"), 1)
+        w.begin(fourcc("RBTC"), 2)
         w.integer(self.theater)
         w.integer(self.wave)
         w.integer(self.score)
@@ -1410,6 +1790,11 @@ struct RobotechSimWorld(Movable):
         w.u32(self.rng_state)
 
         w.f32(self.sdf1_hull)
+        w.boolean(self.sdf1_storm_mode)
+        w.f32(self.sdf1_storm_morph.value)
+        w.f32(self.sdf1_storm_morph.velocity)
+        w.f32(self.daedalus_attack_t)
+        w.f32(self.daedalus_cd)
         w.f32(self.reflex_charge)
         w.f32(self.reflex_beam_t)
         w.vec3(self.reflex_origin_l)
@@ -1426,7 +1811,17 @@ struct RobotechSimWorld(Movable):
         w.f32(self.boss_salvo_cd)
         w.f32(self.boss_flash_t)
         w.integer(self.boss_lock_marks)
+        w.boolean(self.skimming_hull)
+        w.integer(len(self.boss_subsystems))
+        for s in range(len(self.boss_subsystems)):
+            ref sub = self.boss_subsystems[s]
+            w.boolean(sub.active)
+            w.f32(sub.hp)
+            w.f32(sub.max_hp)
+            w.vec3(sub.local_offset)
+            w.integer(sub.lock_marks)
 
+        w.integer(self.pilot_id)
         w.integer(self.mode)
         w.boolean(self.fast_packs)
         w.f32(self.morph_fg.value)
@@ -1518,7 +1913,7 @@ struct RobotechSimWorld(Movable):
         w.end()
 
     def deserialize_state(mut self, mut r: BlobReader) raises:
-        _ = r.enter(fourcc("RBTC"), 1)
+        var ver = r.enter(fourcc("RBTC"), 2)
         self.theater = r.integer()
         self.wave = r.integer()
         self.score = r.integer()
@@ -1528,6 +1923,17 @@ struct RobotechSimWorld(Movable):
         self.rng_state = r.u32()
 
         self.sdf1_hull = r.f32()
+        if ver >= 2:
+            self.sdf1_storm_mode = r.boolean()
+            self.sdf1_storm_morph.value = r.f32()
+            self.sdf1_storm_morph.velocity = r.f32()
+            self.daedalus_attack_t = r.f32()
+            self.daedalus_cd = r.f32()
+        else:
+            self.sdf1_storm_mode = False
+            self.sdf1_storm_morph = SpringFloat(0.0)
+            self.daedalus_attack_t = 0.0
+            self.daedalus_cd = 0.0
         self.reflex_charge = r.f32()
         self.reflex_beam_t = r.f32()
         self.reflex_origin_l = r.vec3()
@@ -1544,7 +1950,26 @@ struct RobotechSimWorld(Movable):
         self.boss_salvo_cd = r.f32()
         self.boss_flash_t = r.f32()
         self.boss_lock_marks = r.integer()
+        if ver >= 2:
+            self.skimming_hull = r.boolean()
+            var nsub = r.integer()
+            self.boss_subsystems.clear()
+            for _ in range(nsub):
+                var sub = DestroyerSubsystem()
+                sub.active = r.boolean()
+                sub.hp = r.f32()
+                sub.max_hp = r.f32()
+                sub.local_offset = r.vec3()
+                sub.lock_marks = r.integer()
+                self.boss_subsystems.append(sub)
+        else:
+            self.skimming_hull = False
+            self._reset_boss_subsystems(1.0)
 
+        if ver >= 2:
+            self.pilot_id = r.integer()
+        else:
+            self.pilot_id = PILOT_SKULL_LEADER
         self.mode = r.integer()
         self.fast_packs = r.boolean()
         self.morph_fg.value = r.f32()
@@ -1646,8 +2071,12 @@ struct RobotechSimWorld(Movable):
                 self.bolt_life.set(b, r.f32())
 
         r.leave()
-        self.comms_banner = "CHECKPOINT RESTORED — " + self.mission_title() + " (WAVE " + String(self.wave) + ")!"
-        self.comms_timer = 3.5
+        self._set_comms("CHECKPOINT RESTORED — " + self.mission_title() + " (WAVE " + String(self.wave) + ")!", 3.5)
+
+    def state_hash(self) -> UInt64:
+        var w = BlobWriter()
+        self.serialize_state(w)
+        return fnv64(w.data)
 
     def save_checkpoint(self, path: String) -> Bool:
         var w = BlobWriter()
@@ -1666,6 +2095,8 @@ struct RobotechSimWorld(Movable):
             + json_quote(self.mission_title())
             + ',"wave":'
             + String(self.wave)
+            + ',"pilot":'
+            + json_quote(self.pilot_callsign())
             + ',"mode":'
             + json_quote(self.mode_name())
             + ',"fast_packs":'
@@ -1674,6 +2105,8 @@ struct RobotechSimWorld(Movable):
             + String(Int(self.hull))
             + ',"sdf1_hull":'
             + String(Int(self.sdf1_hull))
+            + ',"sdf1_storm_mode":'
+            + ("true" if self.sdf1_storm_mode else "false")
             + ',"reflex_charge":'
             + String(Int(self.reflex_charge))
             + ',"missiles_ready":'
@@ -1686,6 +2119,10 @@ struct RobotechSimWorld(Movable):
             + ("true" if self.boss_active else "false")
             + ',"boss_hp":'
             + String(Int(self.boss_hp))
+            + ',"boss_subsystems_intact":'
+            + String(self.intact_subsystem_count())
+            + ',"skimming_hull":'
+            + ("true" if self.skimming_hull else "false")
             + ',"score":'
             + String(self.score)
             + ',"kills":'

@@ -9,6 +9,7 @@ and High Earth Orbit combat theaters.
 from std.math import sin, cos
 from flint.core.math import Vec3
 from flint.core.transform import Mat4, Quat, trs
+from flint.assets.model import NativeModel
 from flint.render.scene_renderer import (
     GpuSceneRenderer,
     FX_SOFT,
@@ -31,8 +32,21 @@ from robotech.asset_forge import (
     VF1_NODE_ARM_L,
     VF1_NODE_ARM_R,
     VF1_NODE_GUNPOD,
+    SDF1_NODE_CORE,
+    SDF1_NODE_BRIDGE,
+    SDF1_NODE_BOOM_L,
+    SDF1_NODE_BOOM_R,
+    SDF1_NODE_PROMETHEUS,
+    SDF1_NODE_DAEDALUS,
+    SDF1_NODE_LEGS,
 )
-from robotech.sim_world import THEATER_MACROSS_ISLAND, THEATER_BOSS_FLEET
+from robotech.sim_world import (
+    THEATER_MACROSS_ISLAND,
+    THEATER_BOSS_FLEET,
+    PILOT_SKULL_LEADER,
+    PILOT_MAX_STERLING,
+    PILOT_MIRIYA_ACE,
+)
 
 
 @fieldwise_init
@@ -107,10 +121,81 @@ def _quat_axis(axis: Vec3, radians: Float32) -> Quat:
     return Quat(n.x * s, n.y * s, n.z * s, cos(half)).normalized()
 
 
+def _pose_vf1_nodes(
+    mut model: NativeModel,
+    morph_fg: Float32,
+    morph_gb: Float32,
+    afterburner: Float32,
+    shield_active: Bool,
+):
+    if len(model.nodes) < 14:
+        return
+    var fg = max(Float32(0.0), min(Float32(1.0), morph_fg))
+    var gb = max(Float32(0.0), min(Float32(1.0), morph_gb))
+
+    # 0. Torso Core: rises upright in Battloid
+    model.nodes[VF1_NODE_TORSO].translation = Vec3(0.0, _lerp(0.0, 0.86, gb), 0.0)
+    model.nodes[VF1_NODE_TORSO].rotation = _quat_axis(Vec3(1, 0, 0), _lerp(0.0, -0.10, gb))
+
+    # 1. Nosecone & Canopy: forward in Fighter/Guardian, folds down into chestplate in Battloid
+    model.nodes[VF1_NODE_NOSE].translation = Vec3(0.0, _lerp(0.02, 0.56, gb), _lerp(1.18, 0.52, gb))
+    model.nodes[VF1_NODE_NOSE].rotation = _quat_axis(Vec3(1, 0, 0), _lerp(0.0, 1.62, gb))
+
+    # 2. VF-1S Head + Quad Lasers: emerges smoothly as morph_gb -> 1
+    var head_s = max(Float32(0.02), clamp01((gb - 0.18) / 0.82))
+    model.nodes[VF1_NODE_HEAD].translation = Vec3(0.0, _lerp(0.10, 0.64, gb), _lerp(0.05, 0.12, gb))
+    model.nodes[VF1_NODE_HEAD].scale = Vec3(head_s, head_s, head_s)
+
+    # 3 & 4. Variable-Sweep NACA Wings: sweep back at high Mach, fold into backpack in Battloid
+    var mach_sweep = clamp01((afterburner - 0.5) * 1.4) * (1.0 - fg) * Float32(0.32)
+    var wing_yaw = _lerp(mach_sweep, Float32(0.95), gb)
+    var wing_dihedral = _lerp(Float32(0.0), Float32(0.68), gb)
+    model.nodes[VF1_NODE_WING_L].translation = Vec3(-0.64, _lerp(0.08, 0.24, gb), _lerp(-0.12, -0.58, gb))
+    model.nodes[VF1_NODE_WING_R].translation = Vec3(0.64, _lerp(0.08, 0.24, gb), _lerp(-0.12, -0.58, gb))
+    model.nodes[VF1_NODE_WING_L].rotation = _quat_axis(Vec3(0, 1, 0), wing_yaw).multiply(_quat_axis(Vec3(0, 0, 1), wing_dihedral))
+    model.nodes[VF1_NODE_WING_R].rotation = _quat_axis(Vec3(0, 1, 0), -wing_yaw).multiply(_quat_axis(Vec3(0, 0, 1), -wing_dihedral))
+
+    # 5 & 6. Twin Tailfins
+    model.nodes[VF1_NODE_TAIL_L].translation = Vec3(-0.52, _lerp(0.22, 0.30, gb), _lerp(-0.95, -0.82, gb))
+    model.nodes[VF1_NODE_TAIL_R].translation = Vec3(0.52, _lerp(0.22, 0.30, gb), _lerp(-0.95, -0.82, gb))
+    model.nodes[VF1_NODE_TAIL_L].rotation = _quat_axis(Vec3(0, 0, 1), _lerp(0.18, 0.48, gb))
+    model.nodes[VF1_NODE_TAIL_R].rotation = _quat_axis(Vec3(0, 0, 1), _lerp(-0.18, -0.48, gb))
+
+    # 7..10. Engine Nacelles (Fighter: +90 deg X -> aft) -> Reverse-Knee GERWALK -> Heroic Battloid Legs
+    var thigh_pitch = _lerp(Float32(1.5708), _lerp(Float32(-0.82), Float32(-0.18), gb), fg)
+    var shin_pitch = _lerp(Float32(0.0), _lerp(Float32(1.18), Float32(0.24), gb), fg)
+    var stance_splay = _lerp(Float32(0.0), Float32(0.11), fg)
+    model.nodes[VF1_NODE_THIGH_L].translation = Vec3(_lerp(-0.54, -0.60, fg), _lerp(-0.08, -0.22, gb), _lerp(-0.22, 0.02, gb))
+    model.nodes[VF1_NODE_THIGH_R].translation = Vec3(_lerp(0.54, 0.60, fg), _lerp(-0.08, -0.22, gb), _lerp(-0.22, 0.02, gb))
+    model.nodes[VF1_NODE_THIGH_L].rotation = _quat_axis(Vec3(0, 0, 1), -stance_splay).multiply(_quat_axis(Vec3(1, 0, 0), thigh_pitch))
+    model.nodes[VF1_NODE_THIGH_R].rotation = _quat_axis(Vec3(0, 0, 1), stance_splay).multiply(_quat_axis(Vec3(1, 0, 0), thigh_pitch))
+    model.nodes[VF1_NODE_SHIN_L].rotation = _quat_axis(Vec3(1, 0, 0), shin_pitch)
+    model.nodes[VF1_NODE_SHIN_R].rotation = _quat_axis(Vec3(1, 0, 0), shin_pitch)
+
+    # 11 & 12. Articulated Arms + Shoulder Pauldrons
+    var arm_s = max(Float32(0.02), clamp01((fg - 0.12) / 0.88))
+    var arm_y = _lerp(-0.26, 0.34, gb)
+    model.nodes[VF1_NODE_ARM_L].translation = Vec3(-1.06, arm_y, 0.10)
+    model.nodes[VF1_NODE_ARM_R].translation = Vec3(1.06, arm_y, 0.10)
+    model.nodes[VF1_NODE_ARM_L].scale = Vec3(arm_s, arm_s, arm_s)
+    model.nodes[VF1_NODE_ARM_R].scale = Vec3(arm_s, arm_s, arm_s)
+    model.nodes[VF1_NODE_ARM_L].rotation = _quat_axis(Vec3(1, 0, 0), _lerp(Float32(0.10), Float32(-0.22) if shield_active else Float32(0.05), gb))
+    model.nodes[VF1_NODE_ARM_R].rotation = _quat_axis(Vec3(1, 0, 0), _lerp(Float32(0.05), Float32(-0.14), gb))
+
+    # 13. GU-11 55mm Rotary Gunpod: belly-mounted in Fighter, held in right hand in Guardian/Battloid
+    model.nodes[VF1_NODE_GUNPOD].translation = _lerp3(
+        Vec3(0.0, -0.40, -0.25),
+        Vec3(1.06, arm_y - 0.56, 0.88),
+        fg,
+    )
+    model.nodes[VF1_NODE_GUNPOD].rotation = _quat_axis(Vec3(1, 0, 0), _lerp(0.0, -0.08 * gb, fg))
+    model.transforms_revision += 1
+
+
 def pose_and_draw_vf1(
     mut scene: GpuSceneRenderer,
     mut assets: RobotechAssetPack,
-    skull_leader: Bool,
+    pilot_id: Int,
     pose: MechaPose,
     morph_fg: Float32,
     morph_gb: Float32,
@@ -120,74 +205,21 @@ def pose_and_draw_vf1(
     fast_packs: Bool = False,
     strike_flash: Bool = False,
 ):
-    """Articulates the 14-node `vf1s_valkyrie.glb` hierarchy (+ optional NP-BP-01 Super/Strike FAST Packs) and draws PBR + VFX."""
-    ref model = assets.vf1s_skull if skull_leader else assets.vf1j_max
-    if len(model.nodes) >= 14:
-        var fg = max(Float32(0.0), min(Float32(1.0), morph_fg))
-        var gb = max(Float32(0.0), min(Float32(1.0), morph_gb))
-
-        # 0. Torso Core: rises upright in Battloid
-        model.nodes[VF1_NODE_TORSO].translation = Vec3(0.0, _lerp(0.0, 0.86, gb), 0.0)
-        model.nodes[VF1_NODE_TORSO].rotation = _quat_axis(Vec3(1, 0, 0), _lerp(0.0, -0.10, gb))
-
-        # 1. Nosecone & Canopy: forward in Fighter/Guardian, folds down into chestplate in Battloid
-        model.nodes[VF1_NODE_NOSE].translation = Vec3(0.0, _lerp(0.02, 0.56, gb), _lerp(1.18, 0.52, gb))
-        model.nodes[VF1_NODE_NOSE].rotation = _quat_axis(Vec3(1, 0, 0), _lerp(0.0, 1.62, gb))
-
-        # 2. VF-1S Head + Quad Lasers: emerges smoothly as morph_gb -> 1
-        var head_s = max(Float32(0.02), clamp01((gb - 0.18) / 0.82))
-        model.nodes[VF1_NODE_HEAD].translation = Vec3(0.0, _lerp(0.10, 0.64, gb), _lerp(0.05, 0.12, gb))
-        model.nodes[VF1_NODE_HEAD].scale = Vec3(head_s, head_s, head_s)
-
-        # 3 & 4. Variable-Sweep NACA Wings: sweep back at high Mach, fold into backpack in Battloid
-        var mach_sweep = clamp01((afterburner - 0.5) * 1.4) * (1.0 - fg) * Float32(0.32)
-        var wing_yaw = _lerp(mach_sweep, Float32(0.95), gb)
-        var wing_dihedral = _lerp(Float32(0.0), Float32(0.68), gb)
-        model.nodes[VF1_NODE_WING_L].translation = Vec3(-0.64, _lerp(0.08, 0.24, gb), _lerp(-0.12, -0.58, gb))
-        model.nodes[VF1_NODE_WING_R].translation = Vec3(0.64, _lerp(0.08, 0.24, gb), _lerp(-0.12, -0.58, gb))
-        model.nodes[VF1_NODE_WING_L].rotation = _quat_axis(Vec3(0, 1, 0), wing_yaw).multiply(_quat_axis(Vec3(0, 0, 1), wing_dihedral))
-        model.nodes[VF1_NODE_WING_R].rotation = _quat_axis(Vec3(0, 1, 0), -wing_yaw).multiply(_quat_axis(Vec3(0, 0, 1), -wing_dihedral))
-
-        # 5 & 6. Twin Tailfins
-        model.nodes[VF1_NODE_TAIL_L].translation = Vec3(-0.52, _lerp(0.22, 0.30, gb), _lerp(-0.95, -0.82, gb))
-        model.nodes[VF1_NODE_TAIL_R].translation = Vec3(0.52, _lerp(0.22, 0.30, gb), _lerp(-0.95, -0.82, gb))
-        model.nodes[VF1_NODE_TAIL_L].rotation = _quat_axis(Vec3(0, 0, 1), _lerp(0.18, 0.48, gb))
-        model.nodes[VF1_NODE_TAIL_R].rotation = _quat_axis(Vec3(0, 0, 1), _lerp(-0.18, -0.48, gb))
-
-        # 7..10. Engine Nacelles (Fighter: +90 deg X -> aft) -> Reverse-Knee GERWALK -> Heroic Battloid Legs
-        var thigh_pitch = _lerp(Float32(1.5708), _lerp(Float32(-0.82), Float32(-0.18), gb), fg)
-        var shin_pitch = _lerp(Float32(0.0), _lerp(Float32(1.18), Float32(0.24), gb), fg)
-        var stance_splay = _lerp(Float32(0.0), Float32(0.11), fg)
-        model.nodes[VF1_NODE_THIGH_L].translation = Vec3(_lerp(-0.54, -0.60, fg), _lerp(-0.08, -0.22, gb), _lerp(-0.22, 0.02, gb))
-        model.nodes[VF1_NODE_THIGH_R].translation = Vec3(_lerp(0.54, 0.60, fg), _lerp(-0.08, -0.22, gb), _lerp(-0.22, 0.02, gb))
-        model.nodes[VF1_NODE_THIGH_L].rotation = _quat_axis(Vec3(0, 0, 1), -stance_splay).multiply(_quat_axis(Vec3(1, 0, 0), thigh_pitch))
-        model.nodes[VF1_NODE_THIGH_R].rotation = _quat_axis(Vec3(0, 0, 1), stance_splay).multiply(_quat_axis(Vec3(1, 0, 0), thigh_pitch))
-        model.nodes[VF1_NODE_SHIN_L].rotation = _quat_axis(Vec3(1, 0, 0), shin_pitch)
-        model.nodes[VF1_NODE_SHIN_R].rotation = _quat_axis(Vec3(1, 0, 0), shin_pitch)
-
-        # 11 & 12. Articulated Arms + Shoulder Pauldrons
-        var arm_s = max(Float32(0.02), clamp01((fg - 0.12) / 0.88))
-        var arm_y = _lerp(-0.26, 0.34, gb)
-        model.nodes[VF1_NODE_ARM_L].translation = Vec3(-1.06, arm_y, 0.10)
-        model.nodes[VF1_NODE_ARM_R].translation = Vec3(1.06, arm_y, 0.10)
-        model.nodes[VF1_NODE_ARM_L].scale = Vec3(arm_s, arm_s, arm_s)
-        model.nodes[VF1_NODE_ARM_R].scale = Vec3(arm_s, arm_s, arm_s)
-        model.nodes[VF1_NODE_ARM_L].rotation = _quat_axis(Vec3(1, 0, 0), _lerp(Float32(0.10), Float32(-0.22) if shield_active else Float32(0.05), gb))
-        model.nodes[VF1_NODE_ARM_R].rotation = _quat_axis(Vec3(1, 0, 0), _lerp(Float32(0.05), Float32(-0.14), gb))
-
-        # 13. GU-11 55mm Rotary Gunpod: belly-mounted in Fighter, held in right hand in Guardian/Battloid
-        model.nodes[VF1_NODE_GUNPOD].translation = _lerp3(
-            Vec3(0.0, -0.40, -0.25),
-            Vec3(1.06, arm_y - 0.56, 0.88),
-            fg,
-        )
-        model.nodes[VF1_NODE_GUNPOD].rotation = _quat_axis(Vec3(1, 0, 0), _lerp(0.0, -0.08 * gb, fg))
-        model.transforms_revision += 1
-
+    """Articulates the 14-node `vf1s_valkyrie.glb` hierarchy (+ optional NP-BP-01 Super/Strike FAST Packs) for any Squadron Pilot livery."""
     var world_mat = pose.to_mat4()
-    scene.draw_model(model, world_mat)
-
-    var globals = model.global_transforms()
+    var globals: List[Mat4]
+    if pilot_id == PILOT_SKULL_LEADER:
+        _pose_vf1_nodes(assets.vf1s_skull, morph_fg, morph_gb, afterburner, shield_active)
+        scene.draw_model(assets.vf1s_skull, world_mat)
+        globals = assets.vf1s_skull.global_transforms().copy()
+    elif pilot_id == PILOT_MIRIYA_ACE:
+        _pose_vf1_nodes(assets.vf1j_miriya, morph_fg, morph_gb, afterburner, shield_active)
+        scene.draw_model(assets.vf1j_miriya, world_mat)
+        globals = assets.vf1j_miriya.global_transforms().copy()
+    else:
+        _pose_vf1_nodes(assets.vf1j_max, morph_fg, morph_gb, afterburner, shield_active)
+        scene.draw_model(assets.vf1j_max, world_mat)
+        globals = assets.vf1j_max.global_transforms().copy()
 
     # Optional NP-BP-01 Super/Strike FAST Pack Dorsal Boosters + RO-X2A Dual Strike Beam Cannon
     if fast_packs and len(globals) > VF1_NODE_TORSO:
@@ -205,7 +237,7 @@ def pose_and_draw_vf1(
                 fp_len,
                 fp_rad,
                 UInt32(0xFFFFFFF2),
-                UInt32(0xFF28EAFF),
+                UInt32(0xFFFF6898) if pilot_id == PILOT_MIRIYA_ACE else UInt32(0xFF28EAFF),
                 alpha=240,
                 emissive=2.25 + afterburner * 0.9,
             )
@@ -221,6 +253,11 @@ def pose_and_draw_vf1(
     if len(globals) > VF1_NODE_SHIN_R:
         var plume_len = (_lerp(Float32(3.8), Float32(1.65), morph_fg) + afterburner * Float32(2.6)) * pose.scale
         var plume_rad = (_lerp(Float32(0.30), Float32(0.22), morph_fg) + afterburner * Float32(0.10)) * pose.scale
+        var outer_col = (
+            UInt32(0xFF38D4FF)
+            if pilot_id == PILOT_SKULL_LEADER
+            else (UInt32(0xFFFF5888) if pilot_id == PILOT_MIRIYA_ACE else UInt32(0xFF4CA8FF))
+        )
         for side in range(2):
             var shin_idx = VF1_NODE_SHIN_L if side == 0 else VF1_NODE_SHIN_R
             var shin_world = world_mat.multiply(globals[shin_idx])
@@ -232,7 +269,7 @@ def pose_and_draw_vf1(
                 plume_len,
                 plume_rad,
                 UInt32(0xFFFFF8DC),
-                UInt32(0xFF38D4FF) if skull_leader else UInt32(0xFF4CA8FF),
+                outer_col,
                 alpha=235,
                 emissive=1.95 + afterburner * 0.85,
             )
@@ -252,6 +289,44 @@ def pose_and_draw_vf1(
         var shield_mat = trs(shield_pos, _quat_axis(pose.up, Float32(1.5708)), Vec3(pose.scale, pose.scale, pose.scale))
         scene.draw_model(assets.barrier_hex, shield_mat, emissive_boost=0.65)
         scene.draw_billboard(shield_pos, 1.55 * pose.scale, FX_SOFT, 0xFF4CEEFF, 115, emissive=1.8)
+
+
+def draw_vf1_planar_shadow(
+    mut scene: GpuSceneRenderer,
+    mut assets: RobotechAssetPack,
+    pilot_id: Int,
+    pose: MechaPose,
+    fast_packs: Bool,
+    plane_point: Vec3,
+    plane_normal: Vec3 = Vec3(0.0, 1.0, 0.0),
+    shadow_color: UInt32 = 0xFF050A14,
+    max_alpha: UInt8 = 138,
+):
+    """Projects the articulated 14-node VF-1 (+ optional FAST Packs) onto a hangar deck, sea/island, or capital hull plane."""
+    var world_mat = pose.to_mat4()
+    var torso_world = world_mat.copy()
+    var has_torso = False
+    if pilot_id == PILOT_SKULL_LEADER:
+        scene.draw_planar_shadow_model(assets.vf1s_skull, world_mat, plane_point, plane_normal, shadow_color, max_alpha)
+        var globs = assets.vf1s_skull.global_transforms()
+        if len(globs) > VF1_NODE_TORSO:
+            torso_world = world_mat.multiply(globs[VF1_NODE_TORSO])
+            has_torso = True
+    elif pilot_id == PILOT_MIRIYA_ACE:
+        scene.draw_planar_shadow_model(assets.vf1j_miriya, world_mat, plane_point, plane_normal, shadow_color, max_alpha)
+        var globs = assets.vf1j_miriya.global_transforms()
+        if len(globs) > VF1_NODE_TORSO:
+            torso_world = world_mat.multiply(globs[VF1_NODE_TORSO])
+            has_torso = True
+    else:
+        scene.draw_planar_shadow_model(assets.vf1j_max, world_mat, plane_point, plane_normal, shadow_color, max_alpha)
+        var globs = assets.vf1j_max.global_transforms()
+        if len(globs) > VF1_NODE_TORSO:
+            torso_world = world_mat.multiply(globs[VF1_NODE_TORSO])
+            has_torso = True
+
+    if fast_packs and has_torso:
+        scene.draw_planar_shadow_model(assets.fast_pack, torso_world, plane_point, plane_normal, shadow_color, max_alpha)
 
 
 def pose_and_draw_regult(
@@ -377,6 +452,100 @@ def draw_thuverl_salan_boss(
         scene.draw_beam_3d(maw, maw_end, 1.45 * pose.scale, FX_BOLT, 0xFFFF2E6E, 235, emissive=2.8)
 
 
+def pose_and_draw_sdf1(
+    mut scene: GpuSceneRenderer,
+    mut assets: RobotechAssetPack,
+    pose: MechaPose,
+    storm_morph: Float32 = 0.0,
+    daedalus_attack_t: Float32 = 0.0,
+    daedalus_target: Vec3 = Vec3(),
+) -> Tuple[Vec3, Vec3]:
+    """Articulates the 7-node `sdf1_macross.glb` Cruiser <-> Storm Attacker fortress + SLV-111 Daedalus Pinpoint-Barrier Attack.
+
+    Returns exact world-space `(boom_l_muzzle, boom_r_muzzle)` for twin Reflex Cannon beams in either configuration.
+    """
+    var sm = clamp01(storm_morph)
+    var punch = sin(clamp01(daedalus_attack_t / Float32(2.3)) * Float32(3.14159)) if daedalus_attack_t > Float32(0.0) else Float32(0.0)
+
+    if len(assets.sdf1.nodes) >= 7:
+        # 0. SDF1_NODE_CORE: Cruiser horizontal (+Z) -> Storm Attacker upright torso (-1.22 rad pitch around +X)
+        assets.sdf1.nodes[SDF1_NODE_CORE].translation = Vec3(0.0, _lerp(0.0, 14.0, sm), 0.0)
+        assets.sdf1.nodes[SDF1_NODE_CORE].rotation = _quat_axis(Vec3(1, 0, 0), _lerp(Float32(0.0), Float32(-1.22), sm))
+
+        # 1. SDF1_NODE_BRIDGE: Command Tower rises & counter-pitches to face forward as the Storm Attacker Head
+        assets.sdf1.nodes[SDF1_NODE_BRIDGE].translation = Vec3(0.0, _lerp(14.0, 12.0, sm), _lerp(-5.0, 32.0, sm))
+        assets.sdf1.nodes[SDF1_NODE_BRIDGE].rotation = _quat_axis(Vec3(1, 0, 0), _lerp(Float32(0.0), Float32(1.22), sm))
+
+        # 2 & 3. SDF1_NODE_BOOM_L / R: Twin 60m Reflex Cannons pivot down over shoulders to aim forward!
+        var boom_pitch = _lerp(Float32(0.0), Float32(1.18), sm)
+        assets.sdf1.nodes[SDF1_NODE_BOOM_L].translation = Vec3(_lerp(-9.0, -13.5, sm), _lerp(3.8, 10.5, sm), _lerp(34.0, 26.0, sm))
+        assets.sdf1.nodes[SDF1_NODE_BOOM_R].translation = Vec3(_lerp(9.0, 13.5, sm), _lerp(3.8, 10.5, sm), _lerp(34.0, 26.0, sm))
+        assets.sdf1.nodes[SDF1_NODE_BOOM_L].rotation = _quat_axis(Vec3(1, 0, 0), boom_pitch)
+        assets.sdf1.nodes[SDF1_NODE_BOOM_R].rotation = _quat_axis(Vec3(1, 0, 0), boom_pitch)
+
+        # 4. SDF1_NODE_PROMETHEUS: Port CVS-101 Carrier swings forward as Left Arm
+        assets.sdf1.nodes[SDF1_NODE_PROMETHEUS].translation = Vec3(-22.5, _lerp(-3.2, 4.0, sm), _lerp(-3.0, 14.0, sm))
+        assets.sdf1.nodes[SDF1_NODE_PROMETHEUS].rotation = _quat_axis(Vec3(1, 0, 0), _lerp(Float32(0.0), Float32(1.15), sm))
+
+        # 5. SDF1_NODE_DAEDALUS: Starboard SLV-111 Assault Carrier swings forward as Right Arm + Daedalus Ram Thrust!
+        var daed_pitch = _lerp(Float32(0.0), Float32(1.15), sm)
+        assets.sdf1.nodes[SDF1_NODE_DAEDALUS].translation = Vec3(
+            22.5,
+            _lerp(-3.2, 4.0, sm) + punch * Float32(4.0),
+            _lerp(-3.0, 14.0, sm) + punch * Float32(18.0),
+        )
+        assets.sdf1.nodes[SDF1_NODE_DAEDALUS].rotation = _quat_axis(Vec3(1, 0, 0), daed_pitch)
+
+        # 6. SDF1_NODE_LEGS: Twin aft city/furnace hulls angle downward as Storm Attacker Legs
+        assets.sdf1.nodes[SDF1_NODE_LEGS].translation = Vec3(0.0, -0.6, -10.0)
+        assets.sdf1.nodes[SDF1_NODE_LEGS].rotation = _quat_axis(Vec3(1, 0, 0), _lerp(Float32(0.0), Float32(-0.24), sm))
+
+        assets.sdf1.transforms_revision += 1
+
+    var world_mat = pose.to_mat4()
+    scene.draw_model(assets.sdf1, world_mat, no_fog=True)
+    var globals = assets.sdf1.global_transforms()
+
+    # 4 Reflex Furnace thermonuclear plumes from articulated aft leg bells
+    if len(globals) > SDF1_NODE_LEGS:
+        var legs_world = world_mat.multiply(globals[SDF1_NODE_LEGS])
+        var aft = legs_world.transform_vector(Vec3(0.0, 0.0, -1.0)).normalized()
+        for k in range(4):
+            var fx = Float32(-9.0) + Float32(k) * Float32(6.0)
+            var noz = legs_world.transform_point(Vec3(fx, -0.5, -38.5))
+            scene.draw_thruster_plume(noz, aft, 22.0 * pose.scale, 3.8 * pose.scale, 0xFFE8FFFF, 0xFF38D4FF, alpha=220, emissive=2.4)
+
+    # SLV-111 Daedalus Pinpoint-Barrier Ramming Bow + Shockwave Beam!
+    if daedalus_attack_t > Float32(0.0) and len(globals) > SDF1_NODE_DAEDALUS:
+        var daed_world = world_mat.multiply(globals[SDF1_NODE_DAEDALUS])
+        var bow_pos = daed_world.transform_point(Vec3(0.0, 0.4, 46.2))
+        var daed_fwd = daed_world.transform_vector(Vec3(0.0, 0.0, 1.0)).normalized()
+        var bar_s = Float32(8.5) * pose.scale * (Float32(0.85) + punch * Float32(0.35))
+        var bar_mat = trs(bow_pos + daed_fwd * Float32(2.0), _quat_axis(Vec3(1, 0, 0), Float32(0.0)), Vec3(bar_s, bar_s, bar_s))
+        scene.draw_model(assets.barrier_hex, bar_mat, emissive_boost=1.45, no_fog=True)
+        scene.draw_billboard(bow_pos, 16.0 * pose.scale, FX_SOFT, 0xFF4CFFEA, 225, emissive=3.2)
+        if daedalus_target.length_squared() > Float32(1.0):
+            var d_alpha = UInt8(max(55, min(245, Int(clamp01(daedalus_attack_t / Float32(1.2)) * Float32(235.0)))))
+            scene.draw_colossal_beam_3d(
+                bow_pos,
+                daedalus_target,
+                radius=1.85,
+                core_color=0xFFE8FFFA,
+                sheath_color=0xFF28FFB8,
+                scroll=daedalus_attack_t * Float32(6.5),
+                alpha=d_alpha,
+                emissive=3.1,
+            )
+            scene.draw_billboard(daedalus_target, 14.0, FX_SOFT, 0xFF38FFC4, d_alpha, emissive=3.2)
+
+    var boom_l = pose.world_pt(-8.6, 3.6, 94.0)
+    var boom_r = pose.world_pt(8.6, 3.6, 94.0)
+    if len(globals) > SDF1_NODE_BOOM_R:
+        boom_l = world_mat.multiply(globals[SDF1_NODE_BOOM_L]).transform_point(Vec3(0.0, 0.0, 60.2))
+        boom_r = world_mat.multiply(globals[SDF1_NODE_BOOM_R]).transform_point(Vec3(0.0, 0.0, 60.2))
+    return (boom_l, boom_r)
+
+
 def draw_macross_environment(
     mut scene: GpuSceneRenderer,
     mut assets: RobotechAssetPack,
@@ -386,8 +555,11 @@ def draw_macross_environment(
     sim_time: Float32 = 0.0,
     reflex_beam_t: Float32 = 0.0,
     reflex_target_pos: Vec3 = Vec3(),
+    sdf1_storm_morph: Float32 = 0.0,
+    daedalus_attack_t: Float32 = 0.0,
+    daedalus_target: Vec3 = Vec3(),
 ):
-    """Renders Mission 1 Atmospheric Macross Island (Pacific Ocean + Cloud Deck) or High Orbit / Fleet Boss Sector + SDF-1 Reflex Cannon!"""
+    """Renders Mission 1 Atmospheric Macross Island (Pacific Ocean + Cloud Deck) or High Orbit / Fleet Boss Sector + SDF-1 Cruiser/Storm Attacker!"""
     var cam = scene.fb.camera
 
     if theater == THEATER_MACROSS_ISLAND:
@@ -475,40 +647,49 @@ def draw_macross_environment(
                 var f_pose = MechaPose.from_angles(Vec3(player_pos.x * Float32(0.25) + fx, fy, fz), Float32(3.05), Float32(-0.04), Float32(0.0), Float32(0.72))
                 scene.draw_model(assets.thuverl_salan, f_pose.to_mat4(), no_fog=True)
 
-    # 5. Colossal SDF-1 Super Dimension Fortress Battlecruiser Overhead/Flank
+    # 5. Colossal SDF-1 Super Dimension Fortress (Cruiser <-> Towering Humanoid Storm Attacker)
+    var storm_engaged = sdf1_storm_morph > Float32(0.05) or daedalus_attack_t > Float32(0.0)
     var sdf_pos = (
-        Vec3(player_pos.x * Float32(0.25) - Float32(138.0), Float32(82.0), player_pos.z + Float32(76.0))
-        if theater == THEATER_BOSS_FLEET or reflex_beam_t > Float32(0.0)
+        Vec3(
+            player_pos.x * Float32(0.25) - _lerp(Float32(138.0), Float32(96.0), clamp01(sdf1_storm_morph)),
+            _lerp(Float32(82.0), Float32(58.0), clamp01(sdf1_storm_morph)),
+            player_pos.z + _lerp(Float32(76.0), Float32(118.0), clamp01(sdf1_storm_morph)),
+        )
+        if theater == THEATER_BOSS_FLEET or reflex_beam_t > Float32(0.0) or storm_engaged
         else Vec3(
             player_pos.x * Float32(0.25) - Float32(52.0),
             Float32(56.0) if theater == THEATER_MACROSS_ISLAND else Float32(66.0),
             player_pos.z + Float32(275.0),
         )
     )
-    var sdf_yaw = Float32(0.68) if (theater == THEATER_BOSS_FLEET or reflex_beam_t > Float32(0.0)) else Float32(-2.52)
+    var sdf_yaw = (
+        Float32(0.54)
+        if (theater == THEATER_BOSS_FLEET or reflex_beam_t > Float32(0.0) or storm_engaged)
+        else Float32(-2.52)
+    )
     var sdf_pose = MechaPose.from_angles(
         sdf_pos,
         sdf_yaw,
-        Float32(-0.08),
-        Float32(0.06),
+        Float32(-0.04) * (Float32(1.0) - clamp01(sdf1_storm_morph)),
+        Float32(0.04) * (Float32(1.0) - clamp01(sdf1_storm_morph)),
         Float32(1.05),
     )
-    scene.draw_model(assets.sdf1, sdf_pose.to_mat4(), no_fog=True)
-    for k in range(4):
-        var fx = Float32(-9.0) + Float32(k) * Float32(6.0)
-        var noz = sdf_pose.world_pt(fx, -1.0, -47.0)
-        var aft = sdf_pose.world_dir(0.0, 0.0, -1.0)
-        scene.draw_thruster_plume(noz, aft, 22.0, 3.8, 0xFFE8FFFF, 0xFF38D4FF, alpha=220, emissive=2.4)
+    var booms = pose_and_draw_sdf1(
+        scene,
+        assets,
+        sdf_pose,
+        storm_morph=sdf1_storm_morph,
+        daedalus_attack_t=daedalus_attack_t,
+        daedalus_target=daedalus_target,
+    )
 
     # 6. Twin Colossal SDF-1 Main Boom Reflex Cannon Beams (`draw_colossal_beam_3d`)!
     if reflex_beam_t > Float32(0.0):
         var fade = min(Float32(1.0), reflex_beam_t / Float32(0.45))
         var pulse = Float32(1.0) + sin(sim_time * Float32(28.0)) * Float32(0.12)
         var b_alpha = UInt8(max(40, min(250, Int(fade * Float32(246.0)))))
-        var boom_l = sdf_pose.world_pt(-8.6, 3.6, 94.0)
-        var boom_r = sdf_pose.world_pt(8.6, 3.6, 94.0)
         scene.draw_colossal_beam_3d(
-            boom_l,
+            booms[0],
             reflex_target_pos,
             radius=2.55 * pulse,
             core_color=0xFFFFFCE2,
@@ -518,7 +699,7 @@ def draw_macross_environment(
             emissive=3.35,
         )
         scene.draw_colossal_beam_3d(
-            boom_r,
+            booms[1],
             reflex_target_pos,
             radius=2.55 * pulse,
             core_color=0xFFFFFCE2,

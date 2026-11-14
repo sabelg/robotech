@@ -3,11 +3,16 @@
 Powered by **Flint Engine** (`flint.*`) in 100% pure Mojo 1.2.
 
 Controls:
-  - `[1]` / `[2]` / `[3]` or `[TAB]`: Transform VF-1S Valkyrie (Fighter / Guardian / Battloid)
+  - `[1]` / `[2]` / `[3]` or `[TAB]`: Transform VF-1 Valkyrie (Fighter / Guardian / Battloid)
+  - `[P]`: Cycle Squadron Pilot & VF-1 Livery (Roy Focker VF-1S / Max Sterling VF-1J / Miriya VF-1J)
+  - `[B]`: Open / Close Interactive CVS-101 Prometheus Hangar Tactical Briefing (`SPACE`/`ENTER` Scramble)
   - `[G]`: Equip / Jettison NP-BP-01 Super/Strike FAST Packs (60 Missiles + RO-X2A Beam Cannon)
+  - `[H]`: Transform SDF-1 Cruiser <-> Towering Storm Attacker / Trigger SLV-111 Daedalus Attack!
   - `[F]`: Fire SDF-1 Main Boom Reflex Cannon Tactical Strike (when 100% charged!)
+  - `[N]`: Toggle Procedural Heroic Macross Stereo BGM Synthesizer
   - `[F1]`: Cycle Campaign Mission (M1 Macross Island / M2 High Orbit / M3 Fleet Boss)
   - `[F5]` / `[F9]`: Instant LZ4 Checkpoint Quick-Save / Quick-Load (`build/quicksave.flz4`)
+  - `[F6]` / `[F7]`: Record / Replay Deterministic `.flrp` Flight Stream (`build/flight_record.flrp`)
   - `WASD` / Arrow Keys / Mouse: Pitch, Yaw, VTOL Strafe & Throttle
   - `SPACE` / `C`: Vertical Thruster Climb / Dive (Guardian & Battloid) or Gunpod Fire (Fighter)
   - `Left Mouse` or `J`: Fire GU-11 55mm Rotary Gunpod (+ RO-X2A Strike Cannon)
@@ -21,7 +26,9 @@ Controls:
 from std.sys import argv
 from std.math import atan2
 from flint.core.math import Vec3
+from flint.core.serial import BlobWriter
 from flint.assets.image import write_png
+from flint.assets.replay_stream import FlintReplayStream
 from flint.platform.os import get_time
 from flint.platform.input import (
     InputState,
@@ -44,6 +51,7 @@ from flint.devtools.mcp_server import (
     FlintMcpLiveEndpoint,
     handle_flint_mcp_query,
 )
+from robotech.asset_forge import pack_robotech_assets
 from robotech.audio_synth import (
     RobotechAudioBank,
     SFX_TRANSFORM,
@@ -56,9 +64,13 @@ from robotech.audio_synth import (
 from robotech.sim_world import (
     RobotechSimWorld,
     PilotControls,
+    encode_pilot_controls,
+    decode_pilot_controls,
     MODE_FIGHTER,
     MODE_GUARDIAN,
     MODE_BATTLOID,
+    PILOT_MAX_STERLING,
+    PILOT_MIRIYA_ACE,
     THEATER_MACROSS_ISLAND,
     THEATER_HIGH_ORBIT,
     THEATER_BOSS_FLEET,
@@ -68,10 +80,13 @@ from robotech.sim_world import (
     EVT_SALVO,
     EVT_EXPLODE,
     EVT_REFLEX,
+    EVT_RADIO,
 )
 from robotech.hud_cockpit import RobotechRenderer, CAM_CHASE, CAM_COCKPIT, CAM_ACTION
 
 comptime QUICKSAVE_PATH: String = "build/quicksave.flz4"
+comptime FLIGHT_RECORD_PATH: String = "build/flight_record.flrp"
+comptime ASSET_PACK_PATH: String = "build/robotech_assets.flpk"
 comptime MCP_SOCKET_PATH: String = "build/flint_robotech_mcp.sock"
 
 
@@ -88,9 +103,11 @@ def gather_controls(input: InputState, mode: Int) -> PilotControls:
     elif input.key_pressed(258) or input.pads[0].pressed[PAD_Y]:
         c.request_mode = (mode + 1) % 3
 
-    # [G] (71): Super/Strike FAST Packs | [F] (70): SDF-1 Reflex Cannon | [F1] (290): Cycle Mission
+    # [G] (71): FAST Packs | [F] (70): Reflex Cannon | [H] (72): SDF-1 Storm/Daedalus | [P] (80): Pilot | [F1] (290): Mission
     c.toggle_fast_packs = input.key_pressed(71) or input.pads[0].pressed[PAD_BACK]
     c.fire_reflex_cannon = input.key_pressed(70) or input.pads[0].pressed[PAD_START]
+    c.toggle_storm_attacker = input.key_pressed(72)
+    c.cycle_pilot = input.key_pressed(80)
     c.cycle_mission = input.key_pressed(290)
 
     var pad_lx = input.pads[0].axes[PAD_AXIS_LEFT_X]
@@ -154,7 +171,7 @@ def gather_controls(input: InputState, mode: Int) -> PilotControls:
 
 
 def render_showcase_shots():
-    """Generates 6 deterministic 1280x720 Macross Saga showcase PNGs into `build/shots/`."""
+    """Generates 8 deterministic 1280x720 Macross Saga showcase PNGs into `build/shots/`."""
     var w = 1280
     var h = 720
     var canvas = SimdCanvas(w, h)
@@ -256,10 +273,10 @@ def render_showcase_shots():
     _ = write_png("build/shots/cockpit_tactical_hud.png", canvas.pixels, w, h)
     sim_cockpit.shutdown()
 
-    # Shot 5: Mission 1 — Macross Island Atmospheric Intercept (Pacific Ocean + Volumetric Cumulus Cloud Deck)!
+    # Shot 5: Mission 1 — Macross Island Atmospheric Intercept (Pacific Ocean + Cloud Deck + Planar Sea Shadows)!
     var sim_island = RobotechSimWorld(4)
     sim_island.set_mission(THEATER_MACROSS_ISLAND)
-    sim_island.pos = Vec3(-8.0, 34.0, -10.0)
+    sim_island.pos = Vec3(-8.0, 26.0, -10.0)
     var c_isl = PilotControls()
     c_isl.lock_held = True
     c_isl.yaw_in = Float32(-0.18)
@@ -279,7 +296,7 @@ def render_showcase_shots():
     _ = write_png("build/shots/macross_island_clouds.png", canvas.pixels, w, h)
     sim_island.shutdown()
 
-    # Shot 6: Mission 3 — Super/Strike VF-1S + SDF-1 Twin Main Reflex Cannon vs Thuverl-Salan Destroyer & Queadluun-Rau!
+    # Shot 6: Mission 3 — Super/Strike VF-1S + SDF-1 Twin Main Reflex Cannon vs Thuverl-Salan Destroyer & Subsystems!
     var sim_boss = RobotechSimWorld(4)
     sim_boss.set_mission(THEATER_BOSS_FLEET)
     var c_boss = PilotControls()
@@ -304,7 +321,57 @@ def render_showcase_shots():
     _ = write_png("build/shots/sdf1_reflex_boss_assault.png", canvas.pixels, w, h)
     sim_boss.shutdown()
 
-    print("[Robotech] Wrote 6 showcase combat screenshots -> build/shots/")
+    # Shot 7: Phase 5 — Miriya's Crimson Super VF-1J + Towering SDF-1 Storm Attacker & SLV-111 Daedalus Pinpoint Attack!
+    var sim_storm = RobotechSimWorld(4)
+    sim_storm.set_mission(THEATER_BOSS_FLEET)
+    sim_storm.set_pilot(PILOT_MIRIYA_ACE)
+    sim_storm.sdf1_storm_mode = True
+    sim_storm.sdf1_storm_morph.value = Float32(1.0)
+    # Position Miriya skimming within 62m of Destroyer while framing full humanoid SDF-1 Storm Attacker + Daedalus beam!
+    sim_storm.boss_pos = Vec3(-18.0, 62.0, 152.0)
+    var sp0 = sim_storm.boss_subsystem_world_pos(0)
+    sim_storm._damage_boss_subsystem(0, Float32(120.0), sp0)
+    sim_storm.pos = Vec3(8.0, 44.0, 86.0)
+    sim_storm.yaw = Float32(-0.54)
+    sim_storm.pitch = Float32(0.14)
+    sim_storm.vel = sim_storm.forward_vec() * Float32(84.0)
+    sim_storm.cam_eye_spring.value = sim_storm.pos - sim_storm.forward_vec() * Float32(14.5) + Vec3(0.0, 4.2, 0.0)
+    sim_storm.cam_target_spring.value = sim_storm.pos + sim_storm.forward_vec() * Float32(28.0)
+    var c_st = PilotControls()
+    c_st.lock_held = True
+    c_st.boost_held = True
+    c_st.fire_gunpod = True
+    for _ in range(3):
+        sim_storm.step(c_st, Float32(0.02))
+    c_st.toggle_storm_attacker = True  # Already in Storm Attacker -> triggers SLV-111 Daedalus Attack!
+    c_st.quick_salvo = True
+    sim_storm.step(c_st, Float32(0.02))
+    c_st.toggle_storm_attacker = False
+    c_st.quick_salvo = False
+    sim_storm.pos = Vec3(4.0, 46.0, 98.0)  # 60.7m from Destroyer -> Hull Trench Skimming active!
+    sim_storm.step(c_st, Float32(0.02))
+    renderer.cam_mode = CAM_CHASE
+    renderer.show_briefing = False
+    renderer.render_frame(canvas, sim_storm, True)
+    _ = write_png("build/shots/sdf1_storm_attacker_daedalus.png", canvas.pixels, w, h)
+    sim_storm.shutdown()
+
+    # Shot 8: Phase 5 — CVS-101 Prometheus Hangar Tactical Briefing, Squadron Roster & GPU Planar Deck Shadow!
+    var sim_brief = RobotechSimWorld(2)
+    sim_brief.set_mission(THEATER_BOSS_FLEET)
+    sim_brief.set_pilot(PILOT_MAX_STERLING)
+    sim_brief.mode = MODE_GUARDIAN
+    sim_brief.morph_fg.value = Float32(1.0)
+    sim_brief.morph_gb.value = Float32(0.0)
+    sim_brief.fast_packs = True
+    sim_brief.sim_time = Float32(0.65)
+    renderer.show_briefing = True
+    renderer.render_frame(canvas, sim_brief, False)
+    _ = write_png("build/shots/tactical_hangar_briefing.png", canvas.pixels, w, h)
+    renderer.show_briefing = False
+    sim_brief.shutdown()
+
+    print("[Robotech] Wrote 8 showcase combat screenshots -> build/shots/")
 
 
 def main():
@@ -313,6 +380,11 @@ def main():
         var a = String(args[i])
         if a == "--shots":
             render_showcase_shots()
+            return
+        if a == "--pack":
+            var out_path = String(args[i + 1]) if i + 1 < len(args) else ASSET_PACK_PATH
+            var nb = pack_robotech_assets(out_path)
+            print("[Robotech] Packed single-file VFS archive -> " + out_path + " (" + String(nb) + " bytes)")
             return
         if a == "--mcp":
             var method = String(args[i + 1]) if i + 1 < len(args) else String("flint_state")
@@ -326,11 +398,16 @@ def main():
     var h = 720
     var sim = RobotechSimWorld()
     var renderer = RobotechRenderer(w, h)
+    renderer.show_briefing = True  # Open on interactive Prometheus Hangar Briefing!
     var canvas = SimdCanvas(w, h)
     var overlays = FlintDevOverlays()
     overlays.active_backend_name = renderer.backend_label()
     var audio = RobotechAudioBank(True)
     var mcp_live = FlintMcpLiveEndpoint(MCP_SOCKET_PATH)
+    var recorder = FlintReplayStream()
+    var recording_active = False
+    var replaying_active = False
+    var replay_idx = 0
 
     var win = WaylandWindow()
     var input = InputState()
@@ -338,7 +415,7 @@ def main():
         mcp_live.close()
         audio.close()
         sim.shutdown()
-        print("[Robotech] Headless session detected — run with '--shots' to render combat PNGs or '--mcp flint_state'.")
+        print("[Robotech] Headless session detected — run with '--shots', '--pack', or '--mcp flint_state'.")
         return
 
     var last_t = get_time()
@@ -354,22 +431,122 @@ def main():
 
         var ctrl = PilotControls()
         if not overlays.handle_input(input):
-            if input.key_pressed(86):  # V -> cycle camera
-                renderer.cam_mode = (renderer.cam_mode + 1) % 3
-            if input.key_pressed(294):  # F5 -> LZ4 Quick-Save
-                if sim.save_checkpoint(QUICKSAVE_PATH):
-                    sim.comms_banner = "LZ4 CHECKPOINT SAVED -> " + QUICKSAVE_PATH
-                    sim.comms_timer = 3.0
-            if input.key_pressed(298):  # F9 -> LZ4 Quick-Load
-                try:
-                    sim.load_checkpoint(QUICKSAVE_PATH)
-                except:
-                    sim.comms_banner = "NO QUICKSAVE FOUND AT " + QUICKSAVE_PATH
-                    sim.comms_timer = 2.5
-            ctrl = gather_controls(input, sim.mode)
+            if input.key_pressed(78):  # N -> Toggle Macross Stereo BGM
+                renderer.bgm_on = audio.toggle_bgm()
+            if input.key_pressed(66):  # B -> Toggle Tactical Hangar Briefing
+                renderer.show_briefing = not renderer.show_briefing
+                audio.trigger_radio()
+
+            if renderer.show_briefing:
+                # Hangar Briefing controls: [P] Pilot, [F1] Mission, [G] FAST Packs, [1-3] Mode, [SPACE/ENTER] Scramble!
+                if input.key_pressed(80):
+                    sim.cycle_pilot()
+                    audio.trigger_radio()
+                if input.key_pressed(290):
+                    sim.set_mission((sim.theater + 1) % 3)
+                    audio.trigger_radio()
+                if input.key_pressed(71):
+                    sim.fast_packs = not sim.fast_packs
+                    sim.missiles_ready = sim.max_missiles()
+                if input.key_pressed(49):
+                    sim.mode = MODE_FIGHTER
+                elif input.key_pressed(50):
+                    sim.mode = MODE_GUARDIAN
+                elif input.key_pressed(51):
+                    sim.mode = MODE_BATTLOID
+                if input.key_pressed(32) or input.key_pressed(257):  # SPACE / ENTER -> Scramble!
+                    renderer.show_briefing = False
+                    audio.trigger_radio()
+            else:
+                if input.key_pressed(86):  # V -> cycle camera
+                    renderer.cam_mode = (renderer.cam_mode + 1) % 3
+                if input.key_pressed(294):  # F5 -> LZ4 Quick-Save
+                    if sim.save_checkpoint(QUICKSAVE_PATH):
+                        sim.comms_banner = "LZ4 CHECKPOINT SAVED -> " + QUICKSAVE_PATH
+                        sim.comms_timer = 3.0
+                if input.key_pressed(298):  # F9 -> LZ4 Quick-Load
+                    try:
+                        sim.load_checkpoint(QUICKSAVE_PATH)
+                    except:
+                        sim.comms_banner = "NO QUICKSAVE FOUND AT " + QUICKSAVE_PATH
+                        sim.comms_timer = 2.5
+
+                # [F6] (295): Start / Stop Deterministic `.flrp` Flight Recorder
+                if input.key_pressed(295):
+                    replaying_active = False
+                    if not recording_active:
+                        var w_init = BlobWriter()
+                        sim.serialize_state(w_init)
+                        recorder.begin_recording("robotech-sdf1", w_init)
+                        recording_active = True
+                        renderer.replay_label = "REC .FLRP [F6]"
+                        sim.comms_banner = "FLIGHT RECORDER ENGAGED -> " + FLIGHT_RECORD_PATH + " ([F6] TO SAVE)"
+                        sim.comms_timer = 3.2
+                    else:
+                        recording_active = False
+                        var w_fin = BlobWriter()
+                        sim.serialize_state(w_fin)
+                        _ = recorder.finish_recording(w_fin)
+                        if recorder.save(FLIGHT_RECORD_PATH):
+                            renderer.replay_label = ""
+                            sim.comms_banner = (
+                                "SAVED "
+                                + String(recorder.tick_count())
+                                + " TICKS -> "
+                                + FLIGHT_RECORD_PATH
+                                + " ([F7] REPLAY)"
+                            )
+                            sim.comms_timer = 3.8
+
+                # [F7] (296): Load & Play Back Deterministic `.flrp` Flight Stream
+                if input.key_pressed(296):
+                    recording_active = False
+                    try:
+                        recorder = FlintReplayStream.load(FLIGHT_RECORD_PATH)
+                        var r_init = recorder.initial_reader()
+                        sim.deserialize_state(r_init)
+                        replaying_active = recorder.tick_count() > 0
+                        replay_idx = 0
+                        renderer.replay_label = "REPLAY .FLRP"
+                        sim.comms_banner = "PLAYING BACK FLIGHT STREAM (" + String(recorder.tick_count()) + " TICKS)..."
+                        sim.comms_timer = 3.0
+                    except:
+                        renderer.replay_label = ""
+                        sim.comms_banner = "NO FLIGHT STREAM FOUND AT " + FLIGHT_RECORD_PATH
+                        sim.comms_timer = 2.6
+
+                if not replaying_active:
+                    ctrl = gather_controls(input, sim.mode)
 
         var t0 = get_time()
-        sim.step(ctrl, dt)
+        if renderer.show_briefing:
+            sim.sim_time += dt
+            var goal_fg = Float32(0.0) if sim.mode == MODE_FIGHTER else Float32(1.0)
+            var goal_gb = Float32(1.0) if sim.mode == MODE_BATTLOID else Float32(0.0)
+            sim.morph_fg.update(goal_fg, Float32(0.14), dt)
+            sim.morph_gb.update(goal_gb, Float32(0.14), dt)
+            sim.sound_events = 0
+        elif replaying_active:
+            if replay_idx < recorder.tick_count():
+                var r_dt = recorder.tick_dts[replay_idx]
+                ctrl = decode_pilot_controls(recorder.tick_inputs[replay_idx])
+                sim.step(ctrl, r_dt)
+                replay_idx += 1
+                renderer.replay_label = "REPLAY " + String((replay_idx * 100) // max(1, recorder.tick_count())) + "%"
+            if replay_idx >= recorder.tick_count():
+                replaying_active = False
+                renderer.replay_label = ""
+                var ok = sim.state_hash() == recorder.final_hash
+                sim.comms_banner = (
+                    "FLRP REPLAY COMPLETE — BIT-EXACT FNV64 STATE VERIFIED!"
+                    if ok
+                    else "FLRP REPLAY COMPLETE!"
+                )
+                sim.comms_timer = 4.0
+        else:
+            if recording_active:
+                recorder.record_tick(dt, encode_pilot_controls(ctrl))
+            sim.step(ctrl, dt)
         var t1 = get_time()
 
         # Answer any non-blocking Flint MCP LiveLink queries over AF_UNIX
@@ -377,7 +554,9 @@ def main():
             FlintMcpInfo("robotech-sdf1", sim.tick_count, renderer.backend_label(), sim.mcp_state_json())
         )
 
-        # Trigger synthesized Robotech SFX from simulation events
+        # Trigger synthesized Robotech SFX + VHF Radio Comms from simulation events
+        if (sim.sound_events & EVT_RADIO) != 0:
+            audio.trigger_radio()
         if (sim.sound_events & EVT_REFLEX) != 0:
             audio.trigger(SFX_REFLEX_CANNON, Float32(1.0), Float32(0.95), 5)
         if (sim.sound_events & EVT_TRANSFORM) != 0:
@@ -398,7 +577,7 @@ def main():
         overlays.render(canvas)
 
         win.present(canvas.pixels, w, h)
-        audio.update(sim.vel.length() / Float32(105.0))
+        audio.update(Float32(0.25) if renderer.show_briefing else (sim.vel.length() / Float32(105.0)))
 
     mcp_live.close()
     audio.close()

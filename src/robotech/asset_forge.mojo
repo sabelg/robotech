@@ -18,8 +18,23 @@ from flint.assets.model import NativeModel, NativeMesh, NativeTexture
 from flint.assets.mesh_builder import MeshBuilder, append_node_meshes, PI_F32
 from flint.assets.glb_writer import write_native_glb
 from flint.assets.glb_native import load_native_glb
+from flint.assets.vfs import vfs_read, load_model_file, write_flpk_pack, MOUNT_NONE
 from flint.render.particle_atlas import value_noise
 
+
+# Squadron Pilot VF-1 Livery IDs
+comptime LIVERY_SKULL_LEADER: Int = 0
+comptime LIVERY_MAX_STERLING: Int = 1
+comptime LIVERY_MIRIYA_ACE: Int = 2
+
+# Articulated node indices inside `sdf1_macross.glb` (7-node Cruiser <-> Storm Attacker rig)
+comptime SDF1_NODE_CORE: Int = 0
+comptime SDF1_NODE_BRIDGE: Int = 1
+comptime SDF1_NODE_BOOM_L: Int = 2
+comptime SDF1_NODE_BOOM_R: Int = 3
+comptime SDF1_NODE_PROMETHEUS: Int = 4
+comptime SDF1_NODE_DAEDALUS: Int = 5
+comptime SDF1_NODE_LEGS: Int = 6
 
 # Articulated node indices inside `vf1s_valkyrie.glb`
 comptime VF1_NODE_TORSO: Int = 0
@@ -54,8 +69,12 @@ def _fbm(x: Float32, y: Float32, seed: Int) -> Float32:
     )
 
 
-def make_vf1_livery_tex(skull_livery: Bool = True) -> NativeTexture:
-    """256x256 weathered UN Spacy aerospace plating with panel seams, rivets, Squadron stripes & UN Spacy kite roundel."""
+def make_vf1_livery_tex(livery_id: Int = LIVERY_SKULL_LEADER) -> NativeTexture:
+    """256x256 weathered UN Spacy aerospace plating:
+    - `0` (`LIVERY_SKULL_LEADER`): Macross White + Skull-1 Gold/Black trim
+    - `1` (`LIVERY_MAX_STERLING`): Macross White + Skull-2 Cobalt Blue/White trim
+    - `2` (`LIVERY_MIRIYA_ACE`): Crimson-Scarlet VF-1J Ace fuselage + Gold/Ivory trim
+    """
     var sz = 256
     var tex = NativeTexture()
     tex.width = sz
@@ -69,25 +88,38 @@ def make_vf1_livery_tex(skull_livery: Bool = True) -> NativeTexture:
             var wear = _fbm(u * 14.0, v * 14.0, 101)
             var streak = value_noise(u * 6.0, v * 38.0, 137)
 
-            # Base warm Macross aerospace white
-            var r = Float32(236.0) - (1.0 - wear) * 18.0 - (1.0 - streak) * 8.0
-            var g = Float32(241.0) - (1.0 - wear) * 17.0 - (1.0 - streak) * 7.0
-            var b = Float32(248.0) - (1.0 - wear) * 14.0 - (1.0 - streak) * 5.0
+            var r: Float32
+            var g: Float32
+            var b: Float32
+            if livery_id == LIVERY_MIRIYA_ACE:
+                # Iconic Miriya Parina Sterling Super VF-1J Crimson-Scarlet plating
+                r = Float32(214.0) - (1.0 - wear) * 24.0 - (1.0 - streak) * 10.0
+                g = Float32(34.0) + wear * 12.0
+                b = Float32(52.0) + wear * 14.0
+            else:
+                # Base warm Macross aerospace white
+                r = Float32(236.0) - (1.0 - wear) * 18.0 - (1.0 - streak) * 8.0
+                g = Float32(241.0) - (1.0 - wear) * 17.0 - (1.0 - streak) * 7.0
+                b = Float32(248.0) - (1.0 - wear) * 14.0 - (1.0 - streak) * 5.0
 
-            # UV [0..0.5, 0.52..0.74]: Squadron livery band (Skull Leader Gold/Black or Skull-2 Max Cobalt/White)
+            # UV [0..0.5, 0.52..0.74]: Squadron livery band
             if u < 0.50 and v >= 0.52 and v <= 0.74:
                 if v < 0.64:
-                    if skull_livery:
+                    if livery_id == LIVERY_SKULL_LEADER:
                         r = 252.0; g = 204.0; b = 46.0
-                    else:
+                    elif livery_id == LIVERY_MAX_STERLING:
                         r = 46.0; g = 136.0; b = 248.0
-                elif v < 0.67:
-                    r = 238.0; g = 242.0; b = 248.0
-                else:
-                    if skull_livery:
-                        r = 28.0; g = 34.0; b = 44.0
                     else:
+                        r = 250.0; g = 212.0; b = 68.0
+                elif v < 0.67:
+                    r = 244.0; g = 246.0; b = 250.0
+                else:
+                    if livery_id == LIVERY_SKULL_LEADER:
+                        r = 28.0; g = 34.0; b = 44.0
+                    elif livery_id == LIVERY_MAX_STERLING:
                         r = 26.0; g = 74.0; b = 168.0
+                    else:
+                        r = 128.0; g = 18.0; b = 32.0
                 r *= 0.88 + wear * 0.14
                 g *= 0.88 + wear * 0.14
                 b *= 0.88 + wear * 0.14
@@ -267,10 +299,10 @@ def clamp_f(v: Float32) -> Float32:
     return max(Float32(0.0), min(Float32(1.0), v))
 
 
-def build_vf1_valkyrie_model(skull_livery: Bool = True) -> NativeModel:
-    """Builds a 14-node articulated curved glTF 2.0 VF-1S Valkyrie model."""
+def build_vf1_valkyrie_model(livery_id: Int = LIVERY_SKULL_LEADER) -> NativeModel:
+    """Builds a 14-node articulated curved glTF 2.0 VF-1 Valkyrie model."""
     var model = NativeModel()
-    model.textures.append(make_vf1_livery_tex(skull_livery))
+    model.textures.append(make_vf1_livery_tex(livery_id))
 
     # 0. Torso Spine + Twin Air Intake Cowls + Skull Collar
     var torso_hull = MeshBuilder(base_color=0xFFFFFFFF, roughness=0.36, metallic=0.16, texture=0)
@@ -583,38 +615,84 @@ def build_glaug_officer_model() -> NativeModel:
 
 
 def build_sdf1_macross_model() -> NativeModel:
-    """Builds the colossal SDF-1 Super Dimension Fortress battlecruiser GLB 2.0 model."""
+    """Builds the 7-node articulated SDF-1 Super Dimension Fortress (`sdf1_macross.glb`)
+    capable of continuous Cruiser <-> towering humanoid Storm Attacker transformation & Daedalus Attack!
+    """
     var model = NativeModel()
     model.textures.append(make_sdf1_cruiser_tex())
 
-    var cruiser = MeshBuilder(base_color=0xFFFFFFFF, roughness=0.38, metallic=0.52, texture=0)
-    # Main central armored battlecruiser hull + dorsal spine + command tower
-    cruiser.add_beveled_box(Vec3(0.0, 0.0, 0.0), Vec3(14.5, 8.8, 44.0), bevel=1.8, u0=0.0, v0=0.0, u1=1.0, v1=0.46)
-    cruiser.add_beveled_box(Vec3(0.0, 10.5, -4.0), Vec3(8.2, 4.2, 22.0), bevel=1.1, u0=0.0, v0=0.0, u1=1.0, v1=0.46)
-    cruiser.add_beveled_box(Vec3(0.0, 18.5, -6.0), Vec3(5.2, 7.5, 7.2), bevel=0.8, u0=0.0, v0=0.0, u1=1.0, v1=0.46)
-    cruiser.add_cylinder(Vec3(-3.2, 25.5, -6.0), Vec3(-3.2, 32.5, -6.0), 0.45, 0.15, 8, u0=0.0, v0=0.0, u1=0.4, v1=0.4)
-    cruiser.add_cylinder(Vec3(3.2, 25.5, -6.0), Vec3(3.2, 32.5, -6.0), 0.45, 0.15, 8, u0=0.0, v0=0.0, u1=0.4, v1=0.4)
+    # 0. SDF1_NODE_CORE: Central armored fortress torso / battlecruiser spine
+    var core_b = MeshBuilder(base_color=0xFFFFFFFF, roughness=0.38, metallic=0.52, texture=0)
+    core_b.add_beveled_box(Vec3(0.0, 0.0, 12.0), Vec3(14.5, 8.8, 25.0), bevel=1.8, u0=0.0, v0=0.0, u1=1.0, v1=0.46)
+    core_b.add_beveled_box(Vec3(0.0, 9.8, 4.0), Vec3(9.4, 4.0, 18.0), bevel=1.0, u0=0.0, v0=0.0, u1=1.0, v1=0.46)
+    var core_prims = List[NativeMesh]()
+    core_prims.append(core_b^.finish())
+    var n_core = append_node_meshes(model, "sdf1_core", core_prims)
 
-    # Twin forward Macross Main Boom Cannons
-    for side in range(2):
-        var sgn = Float32(-1.0) if side == 0 else Float32(1.0)
-        cruiser.add_beveled_box(Vec3(sgn * 8.6, 3.6, 58.0), Vec3(3.8, 4.0, 28.5), bevel=0.8, u0=0.0, v0=0.0, u1=0.8, v1=0.44)
-        cruiser.add_cylinder(Vec3(sgn * 8.6, 3.6, 85.0), Vec3(sgn * 8.6, 3.6, 94.0), 2.4, 1.8, 12, u0=0.0, v0=0.0, u1=0.5, v1=0.44)
-
-    # Port CVS-101 Prometheus (Amber) & Starboard SLV-111 Daedalus (Sea-Green) Carrier Arms
-    cruiser.add_beveled_box(Vec3(-23.5, -3.2, 9.0), Vec3(5.5, 4.8, 29.0), bevel=0.9, u0=0.04, v0=0.54, u1=0.46, v1=0.96)
-    cruiser.add_beveled_box(Vec3(23.5, -3.2, 9.0), Vec3(5.5, 4.8, 29.0), bevel=0.9, u0=0.54, v0=0.54, u1=0.96, v1=0.96)
-
-    # Glowing emerald Command Bridge windows & Reflex Furnace main thrusters
+    # 1. SDF1_NODE_BRIDGE: Command Tower + emerald bridge visor + twin radar masts ("Head" in Storm Attacker)
+    var br_hull = MeshBuilder(base_color=0xFFFFFFFF, roughness=0.36, metallic=0.55, texture=0)
+    br_hull.add_beveled_box(Vec3(0.0, 4.5, 0.0), Vec3(5.4, 7.6, 7.2), bevel=0.8, u0=0.0, v0=0.0, u1=1.0, v1=0.46)
+    br_hull.add_cylinder(Vec3(-3.2, 11.5, 0.0), Vec3(-3.2, 18.8, 0.0), 0.45, 0.15, 8, u0=0.0, v0=0.0, u1=0.4, v1=0.4)
+    br_hull.add_cylinder(Vec3(3.2, 11.5, 0.0), Vec3(3.2, 18.8, 0.0), 0.45, 0.15, 8, u0=0.0, v0=0.0, u1=0.4, v1=0.4)
     var bridge_glow = MeshBuilder(
         base_color=0xFF4CFFBA,
         roughness=0.10,
         metallic=0.0,
         emissive_color=Vec3(0.30, 1.0, 0.72),
-        emissive_strength=2.1,
+        emissive_strength=2.2,
     )
-    bridge_glow.add_beveled_box(Vec3(0.0, 22.0, 1.4), Vec3(4.2, 1.4, 0.6), bevel=0.15)
+    bridge_glow.add_beveled_box(Vec3(0.0, 8.0, 7.3), Vec3(4.2, 1.4, 0.6), bevel=0.15)
+    var br_prims = List[NativeMesh]()
+    br_prims.append(br_hull^.finish())
+    br_prims.append(bridge_glow^.finish())
+    _ = append_node_meshes(model, "sdf1_bridge", br_prims, translation=Vec3(0.0, 14.0, -5.0), parent=n_core)
 
+    # 2 & 3. SDF1_NODE_BOOM_L / R: Twin Macross Main Boom Reflex Cannons (pivot over shoulders in Storm Attacker)
+    for side in range(2):
+        var sgn = Float32(-1.0) if side == 0 else Float32(1.0)
+        var boom_b = MeshBuilder(base_color=0xFFFFFFFF, roughness=0.36, metallic=0.56, texture=0)
+        boom_b.add_beveled_box(Vec3(0.0, 0.0, 26.0), Vec3(3.8, 4.0, 26.5), bevel=0.8, u0=0.0, v0=0.0, u1=0.8, v1=0.44)
+        boom_b.add_cylinder(Vec3(0.0, 0.0, 51.0), Vec3(0.0, 0.0, 60.0), 2.4, 1.8, 12, u0=0.0, v0=0.0, u1=0.5, v1=0.44)
+        var muzzle_glow = MeshBuilder(
+            base_color=0xFF62F0FF,
+            roughness=0.10,
+            metallic=0.0,
+            emissive_color=Vec3(0.38, 0.95, 1.0),
+            emissive_strength=1.8,
+        )
+        muzzle_glow.add_cylinder(Vec3(0.0, 0.0, 59.6), Vec3(0.0, 0.0, 60.4), 1.65, 1.50, 10)
+        var b_prims = List[NativeMesh]()
+        b_prims.append(boom_b^.finish())
+        b_prims.append(muzzle_glow^.finish())
+        _ = append_node_meshes(
+            model,
+            "sdf1_boom_l" if side == 0 else "sdf1_boom_r",
+            b_prims,
+            translation=Vec3(sgn * Float32(9.0), Float32(3.8), Float32(34.0)),
+            parent=n_core,
+        )
+
+    # 4. SDF1_NODE_PROMETHEUS: Port CVS-101 Prometheus Aircraft Carrier Arm (Amber flight deck)
+    var prom_b = MeshBuilder(base_color=0xFFFFFFFF, roughness=0.40, metallic=0.48, texture=0)
+    prom_b.add_beveled_box(Vec3(0.0, 0.0, 14.0), Vec3(5.6, 4.8, 27.5), bevel=0.9, u0=0.04, v0=0.54, u1=0.46, v1=0.96)
+    prom_b.add_beveled_box(Vec3(-2.6, 6.2, 6.0), Vec3(1.8, 2.8, 6.5), bevel=0.4, u0=0.04, v0=0.54, u1=0.46, v1=0.96)
+    var prom_prims = List[NativeMesh]()
+    prom_prims.append(prom_b^.finish())
+    _ = append_node_meshes(model, "sdf1_prometheus", prom_prims, translation=Vec3(-22.5, -3.2, -3.0), parent=n_core)
+
+    # 5. SDF1_NODE_DAEDALUS: Starboard SLV-111 Daedalus Assault Carrier Arm (Sea-Green + armored ramming bow)
+    var daed_b = MeshBuilder(base_color=0xFFFFFFFF, roughness=0.40, metallic=0.48, texture=0)
+    daed_b.add_beveled_box(Vec3(0.0, 0.0, 14.0), Vec3(5.6, 4.8, 27.5), bevel=0.9, u0=0.54, v0=0.54, u1=0.96, v1=0.96)
+    daed_b.add_beveled_box(Vec3(0.0, 0.4, 42.5), Vec3(4.8, 3.8, 3.2), bevel=0.6, u0=0.54, v0=0.54, u1=0.96, v1=0.96)
+    var daed_prims = List[NativeMesh]()
+    daed_prims.append(daed_b^.finish())
+    _ = append_node_meshes(model, "sdf1_daedalus", daed_prims, translation=Vec3(22.5, -3.2, -3.0), parent=n_core)
+
+    # 6. SDF1_NODE_LEGS: Twin aft cruiser city/engine hulls + 4 Reflex Furnace bells (swing down as Storm Attacker legs)
+    var legs_b = MeshBuilder(base_color=0xFFFFFFFF, roughness=0.38, metallic=0.54, texture=0)
+    for side in range(2):
+        var sgn = Float32(-1.0) if side == 0 else Float32(1.0)
+        legs_b.add_beveled_box(Vec3(sgn * Float32(8.2), 0.0, -17.0), Vec3(5.8, 7.2, 18.5), bevel=1.2, u0=0.0, v0=0.0, u1=1.0, v1=0.46)
     var furnace_glow = MeshBuilder(
         base_color=0xFF58EBFF,
         roughness=0.10,
@@ -624,13 +702,12 @@ def build_sdf1_macross_model() -> NativeModel:
     )
     for k in range(4):
         var fx = Float32(-9.0) + Float32(k) * 6.0
-        furnace_glow.add_cylinder(Vec3(fx, -1.0, -43.5), Vec3(fx, -1.0, -47.0), 2.8, 3.4, 14)
+        furnace_glow.add_cylinder(Vec3(fx, -0.5, -35.0), Vec3(fx, -0.5, -38.5), 2.8, 3.4, 14)
+    var leg_prims = List[NativeMesh]()
+    leg_prims.append(legs_b^.finish())
+    leg_prims.append(furnace_glow^.finish())
+    _ = append_node_meshes(model, "sdf1_legs", leg_prims, translation=Vec3(0.0, -0.6, -10.0), parent=n_core)
 
-    var sdf_prims = List[NativeMesh]()
-    sdf_prims.append(cruiser^.finish())
-    sdf_prims.append(bridge_glow^.finish())
-    sdf_prims.append(furnace_glow^.finish())
-    _ = append_node_meshes(model, "sdf1_root", sdf_prims)
     return model^
 
 
@@ -1052,22 +1129,42 @@ def build_macross_island_ocean_model(mut ocean_tex: NativeTexture) -> NativeMode
     return model^
 
 
-def _load_or_forge_glb(path: String, var forged: NativeModel) -> NativeModel:
-    var existing = read_bytes(path)
-    if len(existing) > 128:
-        var loaded = load_native_glb(path)
-        if loaded.loaded():
-            return loaded^
+def _load_or_forge_glb(path: String, var forged: NativeModel, min_nodes: Int = 1) -> NativeModel:
+    var mf = load_model_file(path)
+    if mf.mount != MOUNT_NONE and mf.model.loaded() and len(mf.model.nodes) >= min_nodes:
+        return mf.take_model()
     _ = write_native_glb(path, forged)
     var reloaded = load_native_glb(path)
-    if reloaded.loaded():
+    if reloaded.loaded() and len(reloaded.nodes) >= min_nodes:
         return reloaded^
     return forged^
+
+
+def pack_robotech_assets(output_path: String = "build/robotech_assets.flpk") -> Int:
+    """Ensures all Robotech `.glb`, `.png`, and `.ttf` assets exist and bundles them into a single `.flpk` VFS pack."""
+    var _ensure = RobotechAssetPack()
+    var paths = List[String]()
+    paths.append("assets/models/vf1s_valkyrie.glb")
+    paths.append("assets/models/vf1s_fast_pack.glb")
+    paths.append("assets/models/regult_pod.glb")
+    paths.append("assets/models/glaug_officer.glb")
+    paths.append("assets/models/queadluun_rau.glb")
+    paths.append("assets/models/thuverl_salan.glb")
+    paths.append("assets/models/sdf1_macross.glb")
+    paths.append("assets/sky/earth_orbit.png")
+    paths.append("assets/sky/macross_ocean.png")
+    paths.append("assets/fonts/cockpit_hud.ttf")
+    paths.append("assets/fonts/title_hud.ttf")
+    var count = write_flpk_pack(output_path, paths)
+    if count <= 0:
+        return 0
+    return len(read_bytes(output_path))
 
 
 struct RobotechAssetPack(Movable):
     var vf1s_skull: NativeModel
     var vf1j_max: NativeModel
+    var vf1j_miriya: NativeModel
     var fast_pack: NativeModel
     var regult: NativeModel
     var glaug: NativeModel
@@ -1080,19 +1177,24 @@ struct RobotechAssetPack(Movable):
     var barrier_hex: NativeModel
 
     def __init__(out self):
-        self.vf1s_skull = _load_or_forge_glb("assets/models/vf1s_valkyrie.glb", build_vf1_valkyrie_model(skull_livery=True))
+        self.vf1s_skull = _load_or_forge_glb(
+            "assets/models/vf1s_valkyrie.glb",
+            build_vf1_valkyrie_model(LIVERY_SKULL_LEADER),
+            min_nodes=14,
+        )
 
-        # Wingman Max Sterling's VF-1J shares the exact rig with Cobalt Blue livery texture
-        self.vf1j_max = build_vf1_valkyrie_model(skull_livery=False)
+        # Squadron liveries: Max Sterling's Cobalt VF-1J & Miriya's Crimson/Gold VF-1J Ace!
+        self.vf1j_max = build_vf1_valkyrie_model(LIVERY_MAX_STERLING)
+        self.vf1j_miriya = build_vf1_valkyrie_model(LIVERY_MIRIYA_ACE)
         self.fast_pack = _load_or_forge_glb("assets/models/vf1s_fast_pack.glb", build_vf1_fast_pack_model())
 
-        self.regult = _load_or_forge_glb("assets/models/regult_pod.glb", build_regult_pod_model())
-        self.glaug = _load_or_forge_glb("assets/models/glaug_officer.glb", build_glaug_officer_model())
-        self.queadluun = _load_or_forge_glb("assets/models/queadluun_rau.glb", build_queadluun_rau_model())
+        self.regult = _load_or_forge_glb("assets/models/regult_pod.glb", build_regult_pod_model(), min_nodes=5)
+        self.glaug = _load_or_forge_glb("assets/models/glaug_officer.glb", build_glaug_officer_model(), min_nodes=5)
+        self.queadluun = _load_or_forge_glb("assets/models/queadluun_rau.glb", build_queadluun_rau_model(), min_nodes=5)
         self.thuverl_salan = _load_or_forge_glb("assets/models/thuverl_salan.glb", build_thuverl_salan_destroyer_model())
-        self.sdf1 = _load_or_forge_glb("assets/models/sdf1_macross.glb", build_sdf1_macross_model())
+        self.sdf1 = _load_or_forge_glb("assets/models/sdf1_macross.glb", build_sdf1_macross_model(), min_nodes=7)
 
-        var sky_bytes = read_bytes("assets/sky/earth_orbit.png")
+        var sky_bytes = vfs_read("assets/sky/earth_orbit.png")
         var sky_tex = NativeTexture()
         if len(sky_bytes) > 64:
             var dec = decode_png(sky_bytes, 1024)
@@ -1105,7 +1207,7 @@ struct RobotechAssetPack(Movable):
             _ = write_png("assets/sky/earth_orbit.png", sky_tex.pixels, sky_tex.width, sky_tex.height)
         self.earth = build_orbital_earth_model(sky_tex)
 
-        var ocean_bytes = read_bytes("assets/sky/macross_ocean.png")
+        var ocean_bytes = vfs_read("assets/sky/macross_ocean.png")
         var ocean_tex = NativeTexture()
         if len(ocean_bytes) > 64:
             var dec_o = decode_png(ocean_bytes, 1024)

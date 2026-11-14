@@ -103,6 +103,12 @@ cmd_shot() {
     "${APP_ROOT}/build/robotech-sim" --shots
 }
 
+cmd_pack() {
+    cmd_build game
+    mkdir -p "${APP_ROOT}/build"
+    "${APP_ROOT}/build/robotech-sim" --pack "$@"
+}
+
 cmd_gate() {
     echo "============================================================"
     echo " ROBOTECH: SDF-1 VERITECH COMBAT SIMULATOR — GATE"
@@ -110,9 +116,10 @@ cmd_gate() {
     mkdir -p "${APP_ROOT}/assets/models" "${APP_ROOT}/assets/sky" "${APP_ROOT}/build/shots"
     cmd_build all
     "${APP_ROOT}/build/robotech-test"
+    "${APP_ROOT}/build/robotech-sim" --pack "${APP_ROOT}/build/robotech_assets.flpk"
     "${APP_ROOT}/build/robotech-sim" --shots
     echo "============================================================"
-    echo " [PASS] ROBOTECH GATE PASSED (Tests + 6 Combat Screenshots)"
+    echo " [PASS] ROBOTECH GATE PASSED (Tests + .flpk Pack + 8 Shots)"
     echo "============================================================"
 }
 
@@ -123,8 +130,9 @@ case "$subcmd" in
     play)  cmd_play "$@" ;;
     test)  cmd_test "$@" ;;
     shot)  cmd_shot "$@" ;;
+    pack)  cmd_pack "$@" ;;
     gate)  cmd_gate "$@" ;;
     *)
-        echo "Usage: bash tools/run.sh [play|build|test|shot|gate]"
+        echo "Usage: bash tools/run.sh [play|build|test|shot|pack|gate]"
         ;;
 esac
