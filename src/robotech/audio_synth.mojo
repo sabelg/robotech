@@ -20,6 +20,7 @@ comptime SFX_LOCK_BEEP: Int = 2
 comptime SFX_MISSILE_SALVO: Int = 3
 comptime SFX_EXPLOSION: Int = 4
 comptime SFX_TURBINE_DRONE: Int = 5
+comptime SFX_REFLEX_CANNON: Int = 6
 
 
 @always_inline
@@ -151,6 +152,40 @@ def synth_turbine_drone_clip() -> WavClip:
     return clip^
 
 
+def synth_reflex_cannon_clip() -> WavClip:
+    """SDF-1 Main Boom Reflex Cannon: 0.85s harmonic capacitor charge sweep + colossal mega-particle roar."""
+    var clip = WavClip()
+    clip.valid = True
+    clip.channels = 1
+    clip.sample_rate = SAMPLE_RATE
+    var total = Int(Float32(SAMPLE_RATE) * Float32(0.85))
+    clip.samples.reserve(total)
+    var phase_sub = Float32(0.0)
+    var phase_hi = Float32(0.0)
+    var lp = Float32(0.0)
+    for i in range(total):
+        var t = Float32(i) / Float32(SAMPLE_RATE)
+        var out: Float32
+        if t < Float32(0.22):
+            # Rising Reflex Furnace capacitor whine
+            var p = t / Float32(0.22)
+            var cfreq = Float32(280.0) + p * p * Float32(1480.0)
+            phase_hi += cfreq * Float32(6.2831853) / Float32(SAMPLE_RATE)
+            out = (sin(phase_hi) * Float32(0.62) + sin(phase_hi * Float32(1.5)) * Float32(0.32)) * p
+        else:
+            # Colossal twin-boom heavy particle beam discharge
+            var bt = t - Float32(0.22)
+            var env = max(Float32(0.0), Float32(1.0) - bt / Float32(0.63))
+            var sub_f = Float32(54.0) + Float32(36.0) * max(Float32(0.0), Float32(1.0) - bt * Float32(4.5))
+            phase_sub += sub_f * Float32(6.2831853) / Float32(SAMPLE_RATE)
+            phase_hi += (Float32(440.0) + sin(bt * Float32(28.0)) * Float32(45.0)) * Float32(6.2831853) / Float32(SAMPLE_RATE)
+            lp += (_hash_noise(i + 8191) - lp) * Float32(0.16)
+            var beam = sin(phase_sub) * Float32(0.58) + sin(phase_hi) * Float32(0.24) + lp * Float32(0.55)
+            out = max(Float32(-1.0), min(Float32(1.0), beam * env))
+        clip.samples.append(Int16(Int(out * Float32(24500.0))))
+    return clip^
+
+
 struct RobotechAudioBank(Movable):
     var audio: NativeAudio
     var base_id: Int
@@ -167,6 +202,7 @@ struct RobotechAudioBank(Movable):
         self.audio.clips.append(synth_missile_salvo_clip())
         self.audio.clips.append(synth_explosion_clip())
         self.audio.clips.append(synth_turbine_drone_clip())
+        self.audio.clips.append(synth_reflex_cannon_clip())
         self.audio.drone_clip = SFX_TURBINE_DRONE
         self.audio.set_drone(0.35)
 

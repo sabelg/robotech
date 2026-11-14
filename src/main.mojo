@@ -1,14 +1,18 @@
-"""Robotech: SDF-1 Veritech 3D Combat & Transformation Simulator (`main.mojo`).
+"""Robotech: SDF-1 Veritech 3D Combat & Macross Saga Campaign Simulator (`main.mojo`).
 
 Powered by **Flint Engine** (`flint.*`) in 100% pure Mojo 1.2.
 
 Controls:
   - `[1]` / `[2]` / `[3]` or `[TAB]`: Transform VF-1S Valkyrie (Fighter / Guardian / Battloid)
+  - `[G]`: Equip / Jettison NP-BP-01 Super/Strike FAST Packs (60 Missiles + RO-X2A Beam Cannon)
+  - `[F]`: Fire SDF-1 Main Boom Reflex Cannon Tactical Strike (when 100% charged!)
+  - `[F1]`: Cycle Campaign Mission (M1 Macross Island / M2 High Orbit / M3 Fleet Boss)
+  - `[F5]` / `[F9]`: Instant LZ4 Checkpoint Quick-Save / Quick-Load (`build/quicksave.flz4`)
   - `WASD` / Arrow Keys / Mouse: Pitch, Yaw, VTOL Strafe & Throttle
   - `SPACE` / `C`: Vertical Thruster Climb / Dive (Guardian & Battloid) or Gunpod Fire (Fighter)
-  - `Left Mouse` or `J`: Fire GU-11 55mm Rotary Gunpod
+  - `Left Mouse` or `J`: Fire GU-11 55mm Rotary Gunpod (+ RO-X2A Strike Cannon)
   - `Hold Right Mouse` or `Hold M`: Sweep Multi-Lock Radar -> Release to Launch Itano Circus!
-  - `R` or `K`: Quick-Fire Full 24-Missile Itano Circus Swarm!
+  - `R` or `K`: Quick-Fire Full Itano Circus Micro-Missile Swarm!
   - `SHIFT`: Thermonuclear Afterburner (Fighter/Guardian) or Pinpoint Barrier Shield (Battloid)
   - `Q` / `E`: Evasive Aileron Barrel Roll (breaks incoming Zentraedi missile locks!)
   - `V`: Cycle Camera (Dynamic Chase Cam / VF-1 Cockpit Canopy HUD / Action Wingman Cam)
@@ -19,10 +23,27 @@ from std.math import atan2
 from flint.core.math import Vec3
 from flint.assets.image import write_png
 from flint.platform.os import get_time
-from flint.platform.input import InputState, PAD_A, PAD_B, PAD_X, PAD_Y, PAD_RB, PAD_LB, PAD_AXIS_LEFT_X, PAD_AXIS_LEFT_Y
+from flint.platform.input import (
+    InputState,
+    PAD_A,
+    PAD_B,
+    PAD_X,
+    PAD_Y,
+    PAD_RB,
+    PAD_LB,
+    PAD_START,
+    PAD_BACK,
+    PAD_AXIS_LEFT_X,
+    PAD_AXIS_LEFT_Y,
+)
 from flint.platform.wayland import WaylandWindow
 from flint.render.simd_canvas import SimdCanvas
 from flint.devtools.overlays import FlintDevOverlays
+from flint.devtools.mcp_server import (
+    FlintMcpInfo,
+    FlintMcpLiveEndpoint,
+    handle_flint_mcp_query,
+)
 from robotech.audio_synth import (
     RobotechAudioBank,
     SFX_TRANSFORM,
@@ -30,6 +51,7 @@ from robotech.audio_synth import (
     SFX_LOCK_BEEP,
     SFX_MISSILE_SALVO,
     SFX_EXPLOSION,
+    SFX_REFLEX_CANNON,
 )
 from robotech.sim_world import (
     RobotechSimWorld,
@@ -37,13 +59,20 @@ from robotech.sim_world import (
     MODE_FIGHTER,
     MODE_GUARDIAN,
     MODE_BATTLOID,
+    THEATER_MACROSS_ISLAND,
+    THEATER_HIGH_ORBIT,
+    THEATER_BOSS_FLEET,
     EVT_TRANSFORM,
     EVT_GUNPOD,
     EVT_LOCK,
     EVT_SALVO,
     EVT_EXPLODE,
+    EVT_REFLEX,
 )
 from robotech.hud_cockpit import RobotechRenderer, CAM_CHASE, CAM_COCKPIT, CAM_ACTION
+
+comptime QUICKSAVE_PATH: String = "build/quicksave.flz4"
+comptime MCP_SOCKET_PATH: String = "build/flint_robotech_mcp.sock"
 
 
 def gather_controls(input: InputState, mode: Int) -> PilotControls:
@@ -58,6 +87,11 @@ def gather_controls(input: InputState, mode: Int) -> PilotControls:
         c.request_mode = MODE_BATTLOID
     elif input.key_pressed(258) or input.pads[0].pressed[PAD_Y]:
         c.request_mode = (mode + 1) % 3
+
+    # [G] (71): Super/Strike FAST Packs | [F] (70): SDF-1 Reflex Cannon | [F1] (290): Cycle Mission
+    c.toggle_fast_packs = input.key_pressed(71) or input.pads[0].pressed[PAD_BACK]
+    c.fire_reflex_cannon = input.key_pressed(70) or input.pads[0].pressed[PAD_START]
+    c.cycle_mission = input.key_pressed(290)
 
     var pad_lx = input.pads[0].axes[PAD_AXIS_LEFT_X]
     var pad_ly = input.pads[0].axes[PAD_AXIS_LEFT_Y]
@@ -120,7 +154,7 @@ def gather_controls(input: InputState, mode: Int) -> PilotControls:
 
 
 def render_showcase_shots():
-    """Generates 4 deterministic 1280x720 combat showcase PNGs into `build/shots/`."""
+    """Generates 6 deterministic 1280x720 Macross Saga showcase PNGs into `build/shots/`."""
     var w = 1280
     var h = 720
     var canvas = SimdCanvas(w, h)
@@ -129,8 +163,11 @@ def render_showcase_shots():
     overlays.active_backend_name = renderer.backend_label()
     overlays.show_profiler = True
 
-    # Shot 1: Fighter Mode + 24-Missile Corkscrewing Itano Circus Swarm in Mid-Air!
+    # Shot 1: High-Orbit Fighter Mode + Corkscrewing Itano Circus Swarm!
     var sim = RobotechSimWorld(4)
+    sim.set_mission(THEATER_HIGH_ORBIT)
+    sim.fast_packs = False
+    sim.missiles_ready = 36
     var c1 = PilotControls()
     c1.lock_held = True
     for _ in range(12):
@@ -175,7 +212,7 @@ def render_showcase_shots():
     renderer.render_frame(canvas, sim, False)
     _ = write_png("build/shots/guardian_hover_strafe.png", canvas.pixels, w, h)
 
-    # Shot 3: Towering VF-1S Battloid Mode + Pinpoint Barrier Dueling Zentraedi Glaug Officer!
+    # Shot 3: Towering VF-1S Battloid Mode + Pinpoint Barrier Dueling Glaug & Queadluun-Rau!
     var c_batt = PilotControls()
     c_batt.request_mode = MODE_BATTLOID
     sim.step(c_batt, Float32(0.04))
@@ -205,6 +242,7 @@ def render_showcase_shots():
 
     # Shot 4: First-Person VF-1 Armored Cockpit Canopy View with Multi-Lock Reticles & SDF-1!
     var sim_cockpit = RobotechSimWorld(4)
+    sim_cockpit.set_mission(THEATER_HIGH_ORBIT)
     var c_lock = PilotControls()
     c_lock.lock_held = True
     c_lock.throttle_in = Float32(0.72)
@@ -216,15 +254,72 @@ def render_showcase_shots():
     renderer.cam_mode = CAM_COCKPIT
     renderer.render_frame(canvas, sim_cockpit, False)
     _ = write_png("build/shots/cockpit_tactical_hud.png", canvas.pixels, w, h)
-
     sim_cockpit.shutdown()
-    print("[Robotech] Wrote 4 showcase combat screenshots -> build/shots/")
+
+    # Shot 5: Mission 1 — Macross Island Atmospheric Intercept (Pacific Ocean + Volumetric Cumulus Cloud Deck)!
+    var sim_island = RobotechSimWorld(4)
+    sim_island.set_mission(THEATER_MACROSS_ISLAND)
+    sim_island.pos = Vec3(-8.0, 34.0, -10.0)
+    var c_isl = PilotControls()
+    c_isl.lock_held = True
+    c_isl.yaw_in = Float32(-0.18)
+    c_isl.pitch_in = Float32(-0.06)
+    c_isl.boost_held = True
+    for _ in range(8):
+        sim_island.step(c_isl, Float32(0.04))
+    c_isl.lock_held = False
+    c_isl.quick_salvo = True
+    c_isl.fire_gunpod = True
+    sim_island.step(c_isl, Float32(0.03))
+    c_isl.quick_salvo = False
+    for _ in range(6):
+        sim_island.step(c_isl, Float32(0.03))
+    renderer.cam_mode = CAM_CHASE
+    renderer.render_frame(canvas, sim_island, True)
+    _ = write_png("build/shots/macross_island_clouds.png", canvas.pixels, w, h)
+    sim_island.shutdown()
+
+    # Shot 6: Mission 3 — Super/Strike VF-1S + SDF-1 Twin Main Reflex Cannon vs Thuverl-Salan Destroyer & Queadluun-Rau!
+    var sim_boss = RobotechSimWorld(4)
+    sim_boss.set_mission(THEATER_BOSS_FLEET)
+    var c_boss = PilotControls()
+    c_boss.lock_held = True
+    c_boss.boost_held = True
+    for _ in range(8):
+        sim_boss.step(c_boss, Float32(0.04))
+    var dir_b = (sim_boss.boss_pos - sim_boss.pos).normalized()
+    sim_boss.yaw = atan2(dir_b.x, dir_b.z)
+    sim_boss.pitch = dir_b.y * Float32(0.55)
+    c_boss.lock_held = False
+    c_boss.quick_salvo = True
+    c_boss.fire_gunpod = True
+    c_boss.fire_reflex_cannon = True
+    sim_boss.step(c_boss, Float32(0.03))
+    c_boss.quick_salvo = False
+    c_boss.fire_reflex_cannon = False
+    for _ in range(5):
+        sim_boss.step(c_boss, Float32(0.03))
+    renderer.cam_mode = CAM_CHASE
+    renderer.render_frame(canvas, sim_boss, True)
+    _ = write_png("build/shots/sdf1_reflex_boss_assault.png", canvas.pixels, w, h)
+    sim_boss.shutdown()
+
+    print("[Robotech] Wrote 6 showcase combat screenshots -> build/shots/")
 
 
 def main():
-    for i in range(1, len(argv())):
-        if String(argv()[i]) == "--shots":
+    var args = argv()
+    for i in range(1, len(args)):
+        var a = String(args[i])
+        if a == "--shots":
             render_showcase_shots()
+            return
+        if a == "--mcp":
+            var method = String(args[i + 1]) if i + 1 < len(args) else String("flint_state")
+            var sim_mcp = RobotechSimWorld(2)
+            var info = FlintMcpInfo("robotech-sdf1", sim_mcp.tick_count, "HEADLESS", sim_mcp.mcp_state_json())
+            print(handle_flint_mcp_query(method, "{}", info))
+            sim_mcp.shutdown()
             return
 
     var w = 1280
@@ -235,13 +330,15 @@ def main():
     var overlays = FlintDevOverlays()
     overlays.active_backend_name = renderer.backend_label()
     var audio = RobotechAudioBank(True)
+    var mcp_live = FlintMcpLiveEndpoint(MCP_SOCKET_PATH)
 
     var win = WaylandWindow()
     var input = InputState()
     if not win.initialize(w, h):
+        mcp_live.close()
         audio.close()
         sim.shutdown()
-        print("[Robotech] Headless session detected — run with '--shots' to render combat PNGs.")
+        print("[Robotech] Headless session detected — run with '--shots' to render combat PNGs or '--mcp flint_state'.")
         return
 
     var last_t = get_time()
@@ -259,13 +356,30 @@ def main():
         if not overlays.handle_input(input):
             if input.key_pressed(86):  # V -> cycle camera
                 renderer.cam_mode = (renderer.cam_mode + 1) % 3
+            if input.key_pressed(294):  # F5 -> LZ4 Quick-Save
+                if sim.save_checkpoint(QUICKSAVE_PATH):
+                    sim.comms_banner = "LZ4 CHECKPOINT SAVED -> " + QUICKSAVE_PATH
+                    sim.comms_timer = 3.0
+            if input.key_pressed(298):  # F9 -> LZ4 Quick-Load
+                try:
+                    sim.load_checkpoint(QUICKSAVE_PATH)
+                except:
+                    sim.comms_banner = "NO QUICKSAVE FOUND AT " + QUICKSAVE_PATH
+                    sim.comms_timer = 2.5
             ctrl = gather_controls(input, sim.mode)
 
         var t0 = get_time()
         sim.step(ctrl, dt)
         var t1 = get_time()
 
+        # Answer any non-blocking Flint MCP LiveLink queries over AF_UNIX
+        _ = mcp_live.poll_once(
+            FlintMcpInfo("robotech-sdf1", sim.tick_count, renderer.backend_label(), sim.mcp_state_json())
+        )
+
         # Trigger synthesized Robotech SFX from simulation events
+        if (sim.sound_events & EVT_REFLEX) != 0:
+            audio.trigger(SFX_REFLEX_CANNON, Float32(1.0), Float32(0.95), 5)
         if (sim.sound_events & EVT_TRANSFORM) != 0:
             audio.trigger(SFX_TRANSFORM, Float32(1.0), Float32(0.85), 4)
         if (sim.sound_events & EVT_SALVO) != 0:
@@ -286,6 +400,7 @@ def main():
         win.present(canvas.pixels, w, h)
         audio.update(sim.vel.length() / Float32(105.0))
 
+    mcp_live.close()
     audio.close()
     win.close()
     sim.shutdown()

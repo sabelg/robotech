@@ -107,12 +107,12 @@ cmd_gate() {
     echo "============================================================"
     echo " ROBOTECH: SDF-1 VERITECH COMBAT SIMULATOR — GATE"
     echo "============================================================"
+    mkdir -p "${APP_ROOT}/assets/models" "${APP_ROOT}/assets/sky" "${APP_ROOT}/build/shots"
     cmd_build all
     "${APP_ROOT}/build/robotech-test"
-    mkdir -p "${APP_ROOT}/build/shots"
     "${APP_ROOT}/build/robotech-sim" --shots
     echo "============================================================"
-    echo " [PASS] ROBOTECH GATE PASSED (Tests + 4 Combat Screenshots)"
+    echo " [PASS] ROBOTECH GATE PASSED (Tests + 6 Combat Screenshots)"
     echo "============================================================"
 }
 

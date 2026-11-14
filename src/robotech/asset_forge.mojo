@@ -735,6 +735,323 @@ def build_cockpit_canopy_interior() -> NativeModel:
     return model^
 
 
+def make_fast_pack_tex() -> NativeTexture:
+    """256x256 UN Spacy NP-BP-01 Super/Strike FAST Pack slate-blue titanium plating & yellow hazard trim."""
+    var sz = 256
+    var tex = NativeTexture()
+    tex.width = sz
+    tex.height = sz
+    tex.pixels = List[UInt32](length=sz * sz, fill=0xFFFFFFFF)
+    for y in range(sz):
+        var v = Float32(y) / Float32(sz)
+        for x in range(sz):
+            var u = Float32(x) / Float32(sz)
+            var wear = _fbm(u * 14.0, v * 14.0, 411)
+            # Signature Macross Super Valkyrie slate-cobalt propellant armor
+            var r = Float32(66.0) + wear * 24.0
+            var g = Float32(92.0) + wear * 28.0
+            var b = Float32(126.0) + wear * 32.0
+            if v > 0.66 and v < 0.76:
+                # Skull Squadron yellow/white vernier caution band
+                r = 246.0 * (0.88 + wear * 0.12)
+                g = 198.0 * (0.88 + wear * 0.12)
+                b = 48.0 * (0.88 + wear * 0.12)
+            elif v >= 0.76:
+                # Dark RO-X2A Strike Beam Cannon gunmetal
+                r = 44.0 + wear * 20.0
+                g = 52.0 + wear * 22.0
+                b = 64.0 + wear * 24.0
+            var gx = x % 32
+            var gy = y % 32
+            if gx == 0 or gy == 0:
+                r *= 0.72; g *= 0.74; b *= 0.76
+            tex.pixels[y * sz + x] = _pack_argb(255, Int(r), Int(g), Int(b))
+    return tex^
+
+
+def make_queadluun_tex() -> NativeTexture:
+    """256x256 Miriya Parina Sterling Ace crimson & gold Queadluun-Rau biomechanical carapace."""
+    var sz = 256
+    var tex = NativeTexture()
+    tex.width = sz
+    tex.height = sz
+    tex.pixels = List[UInt32](length=sz * sz, fill=0xFFFFFFFF)
+    for y in range(sz):
+        var v = Float32(y) / Float32(sz)
+        for x in range(sz):
+            var u = Float32(x) / Float32(sz)
+            var n = _fbm(u * 13.0, v * 13.0, 509)
+            var r = Float32(204.0) + n * 42.0
+            var g = Float32(26.0) + n * 20.0
+            var b = Float32(58.0) + n * 24.0
+            if v > 0.54 and v < 0.66:
+                # Zentraedi Quadrono Ace gold filigree trim
+                r = 244.0 + n * 10.0
+                g = 194.0 + n * 22.0
+                b = 62.0 + n * 18.0
+            elif v >= 0.66:
+                # Deep plum/obsidian joint & thruster armor
+                r = 78.0 + n * 24.0
+                g = 34.0 + n * 16.0
+                b = 68.0 + n * 24.0
+            var seam = abs((u * 5.0) - Float32(Int(u * 5.0)) - 0.5)
+            if seam > 0.465:
+                r *= 0.72; g *= 0.72; b *= 0.75
+            tex.pixels[y * sz + x] = _pack_argb(255, Int(r), Int(g), Int(b))
+    return tex^
+
+
+def make_thuverl_salan_tex() -> NativeTexture:
+    """256x256 Zentraedi Thuverl-Salan Heavy Destroyer bio-metallic emerald/violet hull plating."""
+    var sz = 256
+    var tex = NativeTexture()
+    tex.width = sz
+    tex.height = sz
+    tex.pixels = List[UInt32](length=sz * sz, fill=0xFFFFFFFF)
+    for y in range(sz):
+        var v = Float32(y) / Float32(sz)
+        for x in range(sz):
+            var u = Float32(x) / Float32(sz)
+            var m = _fbm(u * 16.0, v * 10.0, 613)
+            var cell = value_noise(u * 28.0, v * 18.0, 641)
+            # Iconic Zentraedi capital warship dark jade-emerald & violet organic armor
+            var r = Float32(48.0) + m * 34.0 + cell * 14.0
+            var g = Float32(102.0) + m * 46.0 + cell * 18.0
+            var b = Float32(88.0) + m * 38.0 + cell * 16.0
+            if v > 0.58:
+                # Violet armored dorsal blisters & weapon sponson trim
+                r = Float32(96.0) + m * 36.0
+                g = Float32(58.0) + m * 24.0
+                b = Float32(124.0) + m * 40.0
+            if (x % 24 == 0) or (y % 24 == 0):
+                r *= 0.68; g *= 0.70; b *= 0.72
+            tex.pixels[y * sz + x] = _pack_argb(255, Int(r), Int(g), Int(b))
+    return tex^
+
+
+def make_macross_ocean_tex() -> NativeTexture:
+    """512x512 sunlit South Pacific azure ocean swells, turquoise coral lagoons & whitecap foam."""
+    var sz = 512
+    var tex = NativeTexture()
+    tex.width = sz
+    tex.height = sz
+    tex.pixels = List[UInt32](length=sz * sz, fill=0xFFFFFFFF)
+    for y in range(sz):
+        var v = Float32(y) / Float32(sz)
+        for x in range(sz):
+            var u = Float32(x) / Float32(sz)
+            var swell = _fbm(u * 24.0, v * 24.0, 733)
+            var ripple = value_noise(u * 68.0, v * 52.0, 757)
+            var r = Float32(18.0) + swell * 28.0 + ripple * 16.0
+            var g = Float32(96.0) + swell * 58.0 + ripple * 24.0
+            var b = Float32(178.0) + swell * 54.0 + ripple * 22.0
+            # Turquoise shallow reef ring around South Ataria Island
+            var dx = (u - 0.54) * 3.4
+            var dy = (v - 0.58) * 3.4
+            var d = sqrt(dx * dx + dy * dy)
+            if d < 0.62:
+                var sh = (0.62 - d) / 0.62
+                r += sh * 38.0
+                g += sh * 86.0
+                b += sh * 42.0
+                if abs(d - 0.36) < 0.035 or ripple > 0.86:
+                    r = min(Float32(252.0), r + 85.0)
+                    g = min(Float32(254.0), g + 75.0)
+                    b = min(Float32(255.0), b + 65.0)
+            elif ripple > 0.88 and swell > 0.58:
+                # Open-ocean sunlit whitecaps
+                r += 64.0; g += 68.0; b += 62.0
+            tex.pixels[y * sz + x] = _pack_argb(255, Int(r), Int(g), Int(b))
+    return tex^
+
+
+def build_vf1_fast_pack_model() -> NativeModel:
+    """Twin dorsal NP-BP-01 Super Booster Pods + starboard dual-barrel RO-X2A Strike Beam Cannon (`vf1s_fast_pack.glb`)."""
+    var model = NativeModel()
+    model.textures.append(make_fast_pack_tex())
+
+    var pack = MeshBuilder(base_color=0xFFFFFFFF, roughness=0.35, metallic=0.36, texture=0)
+    var dark = MeshBuilder(base_color=0xFF232B38, roughness=0.40, metallic=0.72)
+    var glow = MeshBuilder(
+        base_color=0xFF5CF2FF,
+        roughness=0.08,
+        metallic=0.0,
+        emissive_color=Vec3(0.32, 0.94, 1.0),
+        emissive_strength=2.35,
+    )
+
+    for side in range(2):
+        var sgn = Float32(-1.0) if side == 0 else Float32(1.0)
+        var px = sgn * Float32(0.46)
+        # Sculpted dorsal NP-BP-01 booster pod + caution band + forward micro-missile honeycomb bay
+        pack.add_beveled_box(Vec3(px, 0.42, -0.48), Vec3(0.28, 0.24, 1.12), bevel=0.07, u0=0.04, v0=0.04, u1=0.96, v1=0.62)
+        pack.add_beveled_box(Vec3(px, 0.58, -0.62), Vec3(0.22, 0.10, 0.78), bevel=0.04, u0=0.05, v0=0.66, u1=0.95, v1=0.75)
+        dark.add_beveled_box(Vec3(px, 0.43, 0.65), Vec3(0.22, 0.17, 0.08), bevel=0.02)
+        # Main aft rocket bell + vernier core
+        dark.add_cylinder(Vec3(px, 0.42, -1.56), Vec3(px, 0.42, -1.94), 0.23, 0.28, 14)
+        glow.add_cylinder(Vec3(px, 0.42, -1.86), Vec3(px, 0.42, -1.96), 0.20, 0.22, 12)
+        # Conformal leg propellant armor saddle plates
+        pack.add_beveled_box(Vec3(sgn * 0.78, -0.04, -0.42), Vec3(0.11, 0.18, 0.74), bevel=0.04, u0=0.04, v0=0.08, u1=0.88, v1=0.58)
+
+    # Starboard RO-X2A Dual-Barrel Strike Beam Cannon Turret (Signature DYRL / Strike Valkyrie!)
+    pack.add_beveled_box(Vec3(0.46, 0.76, -0.22), Vec3(0.18, 0.13, 0.48), bevel=0.04, u0=0.06, v0=0.78, u1=0.94, v1=0.96)
+    for b_idx in range(2):
+        var bx = Float32(0.39) if b_idx == 0 else Float32(0.53)
+        dark.add_cylinder(Vec3(bx, 0.79, 0.24), Vec3(bx, 0.79, 1.72), 0.052, 0.038, 10)
+        glow.add_cylinder(Vec3(bx, 0.79, 1.68), Vec3(bx, 0.79, 1.76), 0.032, 0.036, 8)
+
+    var prims = List[NativeMesh]()
+    prims.append(pack^.finish())
+    prims.append(dark^.finish())
+    prims.append(glow^.finish())
+    _ = append_node_meshes(model, "vf1s_fast_pack", prims)
+    return model^
+
+
+def build_queadluun_rau_model() -> NativeModel:
+    """5-node Miriya Parina Sterling Ace Queadluun-Rau Heavy Female Power Armor (`queadluun_rau.glb`)."""
+    var model = NativeModel()
+    model.textures.append(make_queadluun_tex())
+
+    var body = MeshBuilder(base_color=0xFFFFFFFF, roughness=0.32, metallic=0.34, texture=0)
+    # Organic curved crimson torso carapace + integrated helm + swept dorsal missile/thruster pods
+    body.add_ellipsoid(Vec3(0.0, 1.55, 0.05), Vec3(0.95, 1.12, 1.08), rings=14, segments=20, u0=0.02, v0=0.02, u1=0.98, v1=0.52)
+    body.add_ellipsoid(Vec3(0.0, 2.48, 0.22), Vec3(0.48, 0.42, 0.62), rings=10, segments=16, u0=0.10, v0=0.54, u1=0.90, v1=0.65)
+    body.add_cylinder(Vec3(0.0, 2.78, 0.12), Vec3(0.0, 3.45, -0.38), 0.09, 0.02, 8, u0=0.1, v0=0.55, u1=0.9, v1=0.65)
+
+    for side in range(2):
+        var sgn = Float32(-1.0) if side == 0 else Float32(1.0)
+        # High-mounted swept shoulder/dorsal thruster & micro-missile pods
+        body.add_ellipsoid(Vec3(sgn * 1.18, 2.08, -0.28), Vec3(0.46, 0.68, 0.92), rings=10, segments=14, u0=0.04, v0=0.04, u1=0.96, v1=0.52)
+        # Triple-barrel forearm pulse-laser gauntlets
+        body.add_ellipsoid(Vec3(sgn * 1.24, 1.22, 0.56), Vec3(0.28, 0.26, 0.72), rings=8, segments=12, u0=0.05, v0=0.68, u1=0.95, v1=0.96)
+        body.add_cylinder(Vec3(sgn * 1.24, 1.22, 1.18), Vec3(sgn * 1.24, 1.22, 1.92), 0.11, 0.07, 10, u0=0.1, v0=0.70, u1=0.9, v1=0.95)
+
+    var visor = MeshBuilder(
+        base_color=0xFF38FFB2,
+        roughness=0.08,
+        metallic=0.0,
+        emissive_color=Vec3(0.22, 1.0, 0.70),
+        emissive_strength=2.3,
+    )
+    visor.add_ellipsoid(Vec3(0.0, 2.46, 0.74), Vec3(0.30, 0.14, 0.18), rings=8, segments=12)
+    for side in range(2):
+        var sgn = Float32(-1.0) if side == 0 else Float32(1.0)
+        visor.add_cylinder(Vec3(sgn * 1.18, 2.08, -1.12), Vec3(sgn * 1.18, 2.08, -1.32), 0.24, 0.28, 10)
+
+    var torso_prims = List[NativeMesh]()
+    torso_prims.append(body^.finish())
+    torso_prims.append(visor^.finish())
+    var n_torso = append_node_meshes(model, "torso", torso_prims)
+
+    for side in range(2):
+        var sgn = Float32(-1.0) if side == 0 else Float32(1.0)
+        var th = MeshBuilder(base_color=0xFFFFFFFF, roughness=0.34, metallic=0.36, texture=0)
+        th.add_ellipsoid(Vec3(0.0, -0.58, 0.16), Vec3(0.34, 0.68, 0.38), rings=8, segments=12, u0=0.06, v0=0.06, u1=0.94, v1=0.52)
+        var th_prims = List[NativeMesh]()
+        th_prims.append(th^.finish())
+        var n_th = append_node_meshes(model, "thigh_l" if side == 0 else "thigh_r", th_prims, translation=Vec3(sgn * 0.56, 0.85, 0.0), parent=n_torso)
+
+        var sh = MeshBuilder(base_color=0xFFFFFFFF, roughness=0.34, metallic=0.38, texture=0)
+        sh.add_ellipsoid(Vec3(0.0, -0.68, -0.18), Vec3(0.38, 0.78, 0.46), rings=10, segments=14, u0=0.06, v0=0.54, u1=0.94, v1=0.96)
+        var sh_prims = List[NativeMesh]()
+        sh_prims.append(sh^.finish())
+        _ = append_node_meshes(model, "shin_l" if side == 0 else "shin_r", sh_prims, translation=Vec3(0.0, -1.05, 0.20), parent=n_th)
+
+    return model^
+
+
+def build_thuverl_salan_destroyer_model() -> NativeModel:
+    """Colossal Zentraedi Thuverl-Salan Heavy Destroyer capital warship (`thuverl_salan.glb`)."""
+    var model = NativeModel()
+    model.textures.append(make_thuverl_salan_tex())
+
+    var hull = MeshBuilder(base_color=0xFFFFFFFF, roughness=0.38, metallic=0.46, texture=0)
+    # Elongated organic bulbous Zentraedi warship hull + predatory armored prow + command dorsal crest
+    hull.add_ellipsoid(Vec3(0.0, 0.0, 0.0), Vec3(13.5, 9.2, 46.0), rings=16, segments=26, u0=0.0, v0=0.0, u1=1.0, v1=0.56)
+    hull.add_ellipsoid(Vec3(0.0, 1.4, 34.0), Vec3(8.6, 5.8, 22.0), rings=12, segments=20, u0=0.0, v0=0.0, u1=1.0, v1=0.56)
+    hull.add_ellipsoid(Vec3(0.0, 8.8, -6.0), Vec3(5.6, 6.4, 18.5), rings=10, segments=16, u0=0.05, v0=0.60, u1=0.95, v1=0.96)
+
+    for side in range(2):
+        var sgn = Float32(-1.0) if side == 0 else Float32(1.0)
+        # Lateral heavy torpedo & plasma cannon sponsons
+        hull.add_ellipsoid(Vec3(sgn * 13.8, -1.2, 6.0), Vec3(5.2, 4.2, 21.0), rings=10, segments=16, u0=0.05, v0=0.60, u1=0.95, v1=0.96)
+        # Dorsal heavy beam cannon turrets
+        hull.add_cylinder(Vec3(sgn * 5.8, 7.6, 14.0), Vec3(sgn * 5.8, 8.8, 23.5), 1.35, 0.72, 10, u0=0.1, v0=0.62, u1=0.9, v1=0.95)
+
+    var ports = MeshBuilder(
+        base_color=0xFFFF5888,
+        roughness=0.14,
+        metallic=0.0,
+        emissive_color=Vec3(1.0, 0.28, 0.52),
+        emissive_strength=1.65,
+    )
+    # Forward heavy converging beam maw slit & lateral torpedo apertures
+    ports.add_ellipsoid(Vec3(0.0, 1.2, 54.8), Vec3(2.4, 0.85, 1.4), rings=8, segments=12)
+    ports.add_cylinder(Vec3(-13.8, -1.2, 25.8), Vec3(-13.8, -1.2, 27.2), 1.15, 0.95, 10)
+    ports.add_cylinder(Vec3(13.8, -1.2, 25.8), Vec3(13.8, -1.2, 27.2), 1.15, 0.95, 10)
+
+    var drives = MeshBuilder(
+        base_color=0xFF88FF9E,
+        roughness=0.10,
+        metallic=0.0,
+        emissive_color=Vec3(0.45, 1.0, 0.62),
+        emissive_strength=2.4,
+    )
+    for k in range(4):
+        var dx = Float32(-8.4) + Float32(k) * Float32(5.6)
+        drives.add_cylinder(Vec3(dx, -0.6, -43.0), Vec3(dx, -0.6, -47.5), 2.6, 3.3, 12)
+
+    var prims = List[NativeMesh]()
+    prims.append(hull^.finish())
+    prims.append(ports^.finish())
+    prims.append(drives^.finish())
+    _ = append_node_meshes(model, "thuverl_salan_root", prims)
+    return model^
+
+
+def build_macross_island_ocean_model(mut ocean_tex: NativeTexture) -> NativeModel:
+    """Curved sunlit South Pacific ocean horizon + sculpted 3D South Ataria (Macross) Island caldera."""
+    var model = NativeModel()
+    model.textures.append(ocean_tex.copy())
+
+    var sea = MeshBuilder(base_color=0xFFFFFFFF, roughness=0.26, metallic=0.12, texture=0)
+    sea.add_ellipsoid(
+        Vec3(0.0, -620.0, 0.0),
+        Vec3(1080.0, 618.5, 1080.0),
+        rings=20,
+        segments=36,
+        theta_start=0.0,
+        theta_end=PI_F32 * 0.44,
+    )
+
+    # Sculpted South Ataria Island emerald volcanic domes & golden coral beach apron in forward sector
+    var beach = MeshBuilder(base_color=0xFFE4CC9E, roughness=0.72, metallic=0.02)
+    beach.add_ellipsoid(Vec3(42.0, -3.2, 198.0), Vec3(74.0, 5.8, 62.0), rings=12, segments=26, theta_start=0.0, theta_end=PI_F32 * 0.52)
+    beach.add_ellipsoid(Vec3(-26.0, -3.0, 226.0), Vec3(46.0, 5.2, 38.0), rings=10, segments=22, theta_start=0.0, theta_end=PI_F32 * 0.52)
+
+    var island = MeshBuilder(base_color=0xFF2B7D42, roughness=0.64, metallic=0.04)
+    island.add_ellipsoid(Vec3(46.0, -1.5, 202.0), Vec3(54.0, 24.5, 44.0), rings=14, segments=24, theta_start=0.0, theta_end=PI_F32 * 0.52)
+    island.add_ellipsoid(Vec3(10.0, -1.5, 214.0), Vec3(34.0, 17.0, 28.0), rings=12, segments=20, theta_start=0.0, theta_end=PI_F32 * 0.52)
+    island.add_ellipsoid(Vec3(-26.0, -1.5, 228.0), Vec3(32.0, 14.0, 26.0), rings=12, segments=20, theta_start=0.0, theta_end=PI_F32 * 0.52)
+
+    # Macross City & UN Spacy airfield towers along the bay
+    var city = MeshBuilder(base_color=0xFFDCE4EE, roughness=0.42, metallic=0.25)
+    for b_i in range(6):
+        var bx = Float32(18.0) + Float32(b_i) * Float32(8.5)
+        var bz = Float32(158.0) + Float32((b_i * 3) % 4) * Float32(6.5)
+        var bh = Float32(3.5) + Float32((b_i * 5) % 4) * Float32(2.2)
+        city.add_beveled_box(Vec3(bx, 1.2 + bh, bz), Vec3(2.6, bh, 2.6), bevel=0.3)
+
+    var prims = List[NativeMesh]()
+    prims.append(sea^.finish())
+    prims.append(beach^.finish())
+    prims.append(island^.finish())
+    prims.append(city^.finish())
+    _ = append_node_meshes(model, "macross_island_ocean", prims)
+    return model^
+
+
 def _load_or_forge_glb(path: String, var forged: NativeModel) -> NativeModel:
     var existing = read_bytes(path)
     if len(existing) > 128:
@@ -751,10 +1068,14 @@ def _load_or_forge_glb(path: String, var forged: NativeModel) -> NativeModel:
 struct RobotechAssetPack(Movable):
     var vf1s_skull: NativeModel
     var vf1j_max: NativeModel
+    var fast_pack: NativeModel
     var regult: NativeModel
     var glaug: NativeModel
+    var queadluun: NativeModel
+    var thuverl_salan: NativeModel
     var sdf1: NativeModel
     var earth: NativeModel
+    var macross_ocean: NativeModel
     var cockpit: NativeModel
     var barrier_hex: NativeModel
 
@@ -763,9 +1084,12 @@ struct RobotechAssetPack(Movable):
 
         # Wingman Max Sterling's VF-1J shares the exact rig with Cobalt Blue livery texture
         self.vf1j_max = build_vf1_valkyrie_model(skull_livery=False)
+        self.fast_pack = _load_or_forge_glb("assets/models/vf1s_fast_pack.glb", build_vf1_fast_pack_model())
 
         self.regult = _load_or_forge_glb("assets/models/regult_pod.glb", build_regult_pod_model())
         self.glaug = _load_or_forge_glb("assets/models/glaug_officer.glb", build_glaug_officer_model())
+        self.queadluun = _load_or_forge_glb("assets/models/queadluun_rau.glb", build_queadluun_rau_model())
+        self.thuverl_salan = _load_or_forge_glb("assets/models/thuverl_salan.glb", build_thuverl_salan_destroyer_model())
         self.sdf1 = _load_or_forge_glb("assets/models/sdf1_macross.glb", build_sdf1_macross_model())
 
         var sky_bytes = read_bytes("assets/sky/earth_orbit.png")
@@ -780,6 +1104,19 @@ struct RobotechAssetPack(Movable):
             sky_tex = make_earth_orbit_tex()
             _ = write_png("assets/sky/earth_orbit.png", sky_tex.pixels, sky_tex.width, sky_tex.height)
         self.earth = build_orbital_earth_model(sky_tex)
+
+        var ocean_bytes = read_bytes("assets/sky/macross_ocean.png")
+        var ocean_tex = NativeTexture()
+        if len(ocean_bytes) > 64:
+            var dec_o = decode_png(ocean_bytes, 1024)
+            if dec_o.valid:
+                ocean_tex.width = dec_o.width
+                ocean_tex.height = dec_o.height
+                ocean_tex.pixels = dec_o.pixels.copy()
+        if ocean_tex.width == 0:
+            ocean_tex = make_macross_ocean_tex()
+            _ = write_png("assets/sky/macross_ocean.png", ocean_tex.pixels, ocean_tex.width, ocean_tex.height)
+        self.macross_ocean = build_macross_island_ocean_model(ocean_tex)
 
         self.cockpit = build_cockpit_canopy_interior()
 

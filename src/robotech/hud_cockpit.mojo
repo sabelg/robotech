@@ -1,11 +1,12 @@
 """Robotech GPU PBR Scene Compositor & SDF-1 Veritech Tactical Cockpit HUD.
 
-Upgrades `RobotechRenderer` to Flint's hardware Vulkan/AMDGPU compute pipeline
+Powered by Flint's hardware Vulkan / AMDGPU RDNA GFX12 compute pipeline
 (`GpuSceneRenderer`, with seamless CPU PBR fallback):
-  - High-detail articulated GLB 2.0 mecha & SDF-1 cruiser (`RobotechAssetPack`)
-  - Cook-Torrance GGX microfacet specular, Fresnel canopy sheen & soft sphere shadows
-  - 48 dynamic combat point lights + AgX filmic tonemapping + multi-pass HDR bloom
-  - Volumetric Itano Circus corkscrew `TEX_RIBBON` smoke trails & `TEX_FLAME` Mach plumes
+  - High-detail articulated GLB 2.0 mecha, Super/Strike FAST Packs, Queadluun-Rau & Thuverl-Salan Destroyer
+  - Cook-Torrance GGX microfacet specular, Fresnel canopy sheen & soft-penumbra sphere shadows
+  - Atmospheric Macross Island (Pacific Ocean + volumetric cumulus cloud deck) & High Orbit SDF-1 theaters
+  - Colossal twin SDF-1 Main Boom Reflex Cannon mega-particle beams (`draw_colossal_beam_3d`)
+  - 48 dynamic combat point lights + AgX filmic tonemapping + 5-tap bilinear HDR bloom
   - Anti-aliased SDF TrueType (`assets/fonts/cockpit_hud.ttf`) tactical cockpit HUD
 """
 from std.ffi import external_call
@@ -26,14 +27,20 @@ from robotech.mecha_meshes import (
     pose_and_draw_vf1,
     pose_and_draw_regult,
     pose_and_draw_glaug,
-    draw_orbital_macross_environment,
+    pose_and_draw_queadluun,
+    draw_thuverl_salan_boss,
+    draw_macross_environment,
 )
 from robotech.sim_world import (
     RobotechSimWorld,
     MODE_FIGHTER,
     MODE_GUARDIAN,
     MODE_BATTLOID,
+    THEATER_MACROSS_ISLAND,
     ENEMY_GLAUG,
+    ENEMY_QUEADLUUN,
+    BOLT_UN_STRIKE_BEAM,
+    BOLT_BOSS_HEAVY,
     TEAM_UN_SPACY,
     MAX_ENEMIES,
     MAX_MISSILES,
@@ -104,8 +111,30 @@ struct RobotechRenderer(Movable):
             return Camera3D(w, h, eye, sim.pos + fwd * Float32(11.5) + Vec3(0.0, 0.3, 0.0), 54.0)
         return Camera3D(w, h, sim.cam_eye_spring.value + shake_off, sim.cam_target_spring.value, 56.0)
 
-    def orbital_lighting_profile(self) -> LightingProfile:
+    def lighting_profile_for_theater(self, theater: Int) -> LightingProfile:
         var p = LightingProfile()
+        if theater == THEATER_MACROSS_ISLAND:
+            # Sunlit South Pacific tropical daylight + cerulean sky scatter + ocean bounce
+            p.key_direction = Vec3(-0.42, -0.72, -0.55).normalized()
+            p.key_color = Vec3(0.88, 0.85, 0.79)
+            p.fill_direction = Vec3(0.32, 0.68, -0.65).normalized()
+            p.fill_color = Vec3(0.18, 0.32, 0.48)
+            p.hemisphere_sky = Vec3(0.22, 0.36, 0.54)
+            p.hemisphere_ground = Vec3(0.08, 0.17, 0.25)
+            p.rim_direction = Vec3(0.24, -0.28, 0.93).normalized()
+            p.rim_color = Vec3(0.20, 0.36, 0.50)
+            p.fog_color = Vec3(82, 154, 222)
+            p.fog_start = 240.0
+            p.fog_end = 640.0
+            p.height_fog = 0.0
+            p.exposure = 0.94
+            p.saturation = 1.09
+            p.filmic = 1.0
+            p.cdl_slope = Vec3(1.02, 1.01, 1.03)
+            p.cdl_offset = Vec3(0.0, 0.0, 0.002)
+            p.cdl_power = Vec3(0.99, 0.99, 0.98)
+            return p
+
         # High-orbit solar key light + cool cobalt Earthshine fill + anime-cinema rim
         p.key_direction = Vec3(-0.44, -0.68, -0.58).normalized()
         p.key_color = Vec3(0.92, 0.89, 0.84)
@@ -132,8 +161,20 @@ struct RobotechRenderer(Movable):
         var right = sim.right_vec()
         var shield_on = sim.mode == MODE_BATTLOID and boost_held and sim.shield > Float32(5.0)
 
-        # 1. Player VF-1S Afterburners, Gunpod Muzzle Flash & Pinpoint Barrier Lights
-        var ab_int = Float32(1.05) if boost_held else Float32(0.65)
+        # 0. SDF-1 Main Boom Reflex Cannon Convergence Megablast Light!
+        if sim.reflex_beam_t > Float32(0.0):
+            var fade = min(Float32(1.0), sim.reflex_beam_t / Float32(0.5))
+            self.scene.add_point_light(
+                sim.reflex_target_pos - Vec3(0.0, 0.0, 24.0),
+                Vec3(0.42, 0.94, 1.0),
+                64.0,
+                0.88 * fade,
+                priority=100,
+                stable_id=900,
+            )
+
+        # 1. Player VF-1S Afterburners, Gunpod / Strike Cannon Muzzle Flash & Pinpoint Barrier Lights
+        var ab_int = (Float32(0.78) if sim.fast_packs else Float32(0.68)) if boost_held else Float32(0.48)
         self.scene.add_point_light(
             sim.pos - fwd * Float32(3.6),
             Vec3(0.28, 0.86, 1.0),
@@ -147,16 +188,25 @@ struct RobotechRenderer(Movable):
                 sim.pos + fwd * Float32(4.2) + right * Float32(0.9),
                 Vec3(1.0, 0.88, 0.42),
                 11.0,
-                0.95,
+                0.78,
                 priority=96,
                 stable_id=2,
+            )
+        if sim.strike_flash_t > Float32(0.0):
+            self.scene.add_point_light(
+                sim.pos + fwd * Float32(3.6) + right * Float32(0.55) + Vec3(0.0, 0.9, 0.0),
+                Vec3(0.32, 0.96, 1.0),
+                12.0,
+                0.82,
+                priority=95,
+                stable_id=5,
             )
         if shield_on:
             self.scene.add_point_light(
                 sim.pos - right * Float32(1.8) + fwd * Float32(1.4),
                 Vec3(0.25, 0.92, 1.0),
                 10.0,
-                0.90,
+                0.65,
                 priority=94,
                 stable_id=3,
             )
@@ -170,6 +220,17 @@ struct RobotechRenderer(Movable):
             priority=64,
             stable_id=4,
         )
+
+        # Thuverl-Salan Destroyer Boss Plasma Maw Light
+        if sim.boss_active and sim.boss_flash_t > Float32(0.0):
+            self.scene.add_point_light(
+                sim.boss_pos + Vec3(0.0, 2.0, -38.0),
+                Vec3(1.0, 0.28, 0.56),
+                42.0,
+                2.15,
+                priority=97,
+                stable_id=901,
+            )
 
         # 2. Active Plasma Explosion Fireballs (Highest Priority Dynamic Lights!)
         for fi in range(MAX_FIREBALLS):
@@ -201,7 +262,7 @@ struct RobotechRenderer(Movable):
         for m in range(MAX_MISSILES):
             if not sim.mis_active[m]:
                 continue
-            if mis_lights >= 24:
+            if mis_lights >= 22:
                 break
             var mp = Vec3(sim.mis_x.get(m), sim.mis_y.get(m), sim.mis_z.get(m))
             if (mp - sim.pos).length_squared() < Float32(36.0):
@@ -212,17 +273,18 @@ struct RobotechRenderer(Movable):
 
         # 5. Analytic Soft-Penumbra Self-Shadowing Spheres (`MAX_SHADOW_SPHERES = 8`)
         if self.cam_mode != CAM_COCKPIT:
-            # Upper fuselage/wing shadow caster -> casts solar shadow across GERWALK/Battloid legs & gunpod
             self.scene.add_shadow_sphere(sim.pos + Vec3(0.0, 0.95 + sim.morph_gb.value * 0.65, 0.25), 1.35)
             if sim.morph_gb.value < Float32(0.75):
                 self.scene.add_shadow_sphere(sim.pos + right * Float32(1.65) + Vec3(0.0, 0.25, -0.2), 0.95)
         self.scene.add_shadow_sphere(sim.wing_pos + Vec3(0.0, 0.65, 0.0), 1.30)
+        if sim.boss_active:
+            self.scene.add_shadow_sphere(sim.boss_pos, 14.5)
         for ei in range(MAX_ENEMIES):
             if not sim.enemies[ei].active:
                 continue
             if len(self.scene.sphere_centers) >= 8:
                 break
-            var rad = Float32(2.1) if sim.enemies[ei].kind == ENEMY_GLAUG else Float32(1.6)
+            var rad = Float32(2.1) if sim.enemies[ei].kind >= ENEMY_GLAUG else Float32(1.6)
             self.scene.add_shadow_sphere(sim.enemies[ei].pos + Vec3(0.0, 0.75, 0.0), rad)
 
     def render_frame(mut self, mut canvas: SimdCanvas, sim: RobotechSimWorld, boost_held: Bool = False):
@@ -231,34 +293,52 @@ struct RobotechRenderer(Movable):
         self._ensure_size(w, h)
 
         var cam = self.build_camera(sim, w, h)
-        var profile = self.orbital_lighting_profile()
+        var profile = self.lighting_profile_for_theater(sim.theater)
         var to_sun = Vec3(-profile.key_direction.x, -profile.key_direction.y, -profile.key_direction.z).normalized()
 
         self.scene.begin_frame(cam.eye, cam.target, cam.fov_rad * Float32(57.2957795), profile, dt=1.0 / 60.0, quality=2, reduced_effects=False)
         self._register_combat_lights_and_shadows(sim, boost_held)
         self.scene.commit_lighting()
 
-        # 1. Orbital Earth Horizon, Rayleigh Atmosphere, Solar Corona, Nebula & Colossal SDF-1 Cruiser
-        draw_orbital_macross_environment(self.scene, self.assets, sim.pos, to_sun)
+        # 1. Theater Environment (Macross Island Pacific + Cloud Deck OR High Orbit Earth) + SDF-1 Reflex Cannon
+        draw_macross_environment(
+            self.scene,
+            self.assets,
+            sim.pos,
+            to_sun,
+            sim.theater,
+            sim.sim_time,
+            sim.reflex_beam_t,
+            sim.reflex_target_pos,
+        )
 
-        # 2. Zentraedi Regult Battlepods & Glaug Officer Command Pods
+        # 2. Colossal Zentraedi Thuverl-Salan Heavy Destroyer Boss (Mission 3+)
+        if sim.boss_active:
+            var b_pose = MechaPose.from_angles(sim.boss_pos, sim.boss_yaw, Float32(-0.03), Float32(0.04), Float32(1.0))
+            draw_thuverl_salan_boss(self.scene, self.assets, b_pose, sim.boss_flash_t > Float32(0.0))
+
+        # 3. Zentraedi Regult Battlepods, Glaug Officers & Miriya's Queadluun-Rau Aces
         for i in range(MAX_ENEMIES):
             if not sim.enemies[i].active:
                 continue
             ref e = sim.enemies[i]
+            var scale = Float32(1.38) if e.kind == ENEMY_QUEADLUUN else (Float32(1.55) if e.kind == ENEMY_GLAUG else Float32(1.25))
+            var roll_lean = sin(e.stride_phase * Float32(0.5)) * Float32(0.22) if e.kind == ENEMY_QUEADLUUN else Float32(0.0)
             var e_pose = MechaPose.from_angles(
                 e.pos,
                 e.yaw,
                 e.pitch * Float32(0.35),
-                Float32(0.0),
-                Float32(1.55) if e.kind == ENEMY_GLAUG else Float32(1.25),
+                roll_lean,
+                scale,
             )
-            if e.kind == ENEMY_GLAUG:
+            if e.kind == ENEMY_QUEADLUUN:
+                pose_and_draw_queadluun(self.scene, self.assets, e_pose, e.stride_phase, e.firing_flash > Float32(0.0))
+            elif e.kind == ENEMY_GLAUG:
                 pose_and_draw_glaug(self.scene, self.assets, e_pose, e.stride_phase, e.firing_flash > Float32(0.0))
             else:
                 pose_and_draw_regult(self.scene, self.assets, e_pose, e.stride_phase, e.firing_flash > Float32(0.0))
 
-        # 3. Wingman VF-1J ("MAX STERLING - SKULL 2" in Cobalt Blue Livery)
+        # 4. Wingman VF-1J ("MAX STERLING - SKULL 2" in Cobalt Blue Livery)
         var wing_pose = MechaPose.from_angles(sim.wing_pos, sim.wing_yaw, sim.wing_pitch, Float32(-0.18), Float32(1.0))
         pose_and_draw_vf1(
             self.scene,
@@ -270,9 +350,11 @@ struct RobotechRenderer(Movable):
             afterburner=0.68,
             gun_flash=sim.wing_gun_flash > Float32(0.0),
             shield_active=False,
+            fast_packs=sim.fast_packs,
+            strike_flash=False,
         )
 
-        # 4. Player VF-1S Valkyrie ("SKULL LEADER") or 1st-Person Physical 3D Cockpit Canopy
+        # 5. Player VF-1S Valkyrie ("SKULL LEADER") or 1st-Person Physical 3D Cockpit Canopy
         if self.cam_mode != CAM_COCKPIT:
             var p_pose = MechaPose.from_angles(sim.pos, sim.yaw, sim.pitch, sim.roll.value, Float32(1.05))
             var ab = Float32(1.0) if boost_held else Float32(0.58)
@@ -287,6 +369,8 @@ struct RobotechRenderer(Movable):
                 afterburner=ab,
                 gun_flash=sim.gun_flash_t > Float32(0.0),
                 shield_active=shield_on,
+                fast_packs=sim.fast_packs,
+                strike_flash=sim.strike_flash_t > Float32(0.0),
             )
         else:
             var c_pose = MechaPose.from_angles(sim.pos, sim.yaw, sim.pitch, sim.roll.value * Float32(0.35), Float32(1.0))
@@ -296,7 +380,7 @@ struct RobotechRenderer(Movable):
                 var m1 = c_pose.world_pt(0.0, -0.06, 11.50)
                 self.scene.draw_beam_3d(m0, m1, 0.14, FX_BOLT, 0xFFFFE478, 220, emissive=2.4)
 
-        # 5. Corkscrewing Itano Circus Volumetric `TEX_RIBBON` Smoke Trails + Warhead Plumes
+        # 6. Corkscrewing Itano Circus Volumetric `TEX_RIBBON` Smoke Trails + Warhead Plumes
         var trail_pts = List[Vec3](capacity=MIS_TRAIL_LEN)
         for m in range(MAX_MISSILES):
             if not sim.mis_active[m]:
@@ -326,7 +410,6 @@ struct RobotechRenderer(Movable):
                 tail_alpha=14,
                 emissive=Float32(0.55) if is_un else Float32(0.75),
             )
-            # Glowing micro-missile rocket motor & flare
             self.scene.draw_thruster_plume(
                 cur,
                 vdir * -1.0,
@@ -339,20 +422,21 @@ struct RobotechRenderer(Movable):
             )
             self.scene.draw_billboard(cur, 0.34, FX_SOFT, UInt32(0xFFFFECA0) if is_un else UInt32(0xFFFF4272), 235, emissive=2.6)
 
-        # 6. GU-11 Gunpod Tracers & Zentraedi Heavy Plasma Bolts
+        # 7. GU-11 Gunpod Tracers, RO-X2A Strike Beam Cannon Bolts & Zentraedi Heavy Plasma Bolts
         for b in range(MAX_BOLTS):
             if not sim.bolt_active[b]:
                 continue
             var bp = Vec3(sim.bolt_x.get(b), sim.bolt_y.get(b), sim.bolt_z.get(b))
             var bv = Vec3(sim.bolt_vx.get(b), sim.bolt_vy.get(b), sim.bolt_vz.get(b)).normalized()
+            var bk = sim.bolt_kind[b]
             var is_un = sim.bolt_team[b] == TEAM_UN_SPACY
-            var bcol = UInt32(0xFFFFE468) if is_un else UInt32(0xFFFF3262)
-            var b_len = Float32(5.4) if is_un else Float32(7.2)
-            var b_hw = Float32(0.14) if is_un else Float32(0.24)
-            self.scene.draw_beam_3d(bp - bv * b_len, bp, b_hw, FX_BOLT, bcol, 235, emissive=2.55)
-            self.scene.draw_billboard(bp, b_hw * 2.2, FX_SOFT, UInt32(0xFFFFFFFF) if is_un else UInt32(0xFFFF98B8), 220, emissive=2.8)
+            var bcol = UInt32(0xFF38EEFF) if bk == BOLT_UN_STRIKE_BEAM else (UInt32(0xFFFFE468) if is_un else (UInt32(0xFFFF4888) if bk == BOLT_BOSS_HEAVY else UInt32(0xFFFF3262)))
+            var b_len = Float32(7.6) if bk == BOLT_UN_STRIKE_BEAM else (Float32(5.4) if is_un else (Float32(12.0) if bk == BOLT_BOSS_HEAVY else Float32(7.2)))
+            var b_hw = Float32(0.18) if bk == BOLT_UN_STRIKE_BEAM else (Float32(0.14) if is_un else (Float32(0.52) if bk == BOLT_BOSS_HEAVY else Float32(0.24)))
+            self.scene.draw_beam_3d(bp - bv * b_len, bp, b_hw, FX_BOLT, bcol, 238, emissive=2.65)
+            self.scene.draw_billboard(bp, b_hw * 2.2, FX_SOFT, UInt32(0xFFFFFFFF) if is_un else UInt32(0xFFFF98B8), 220, emissive=2.85)
 
-        # 7. Expanding Volumetric HDR Plasma Fireballs
+        # 8. Expanding Volumetric HDR Plasma Fireballs
         for fi in range(MAX_FIREBALLS):
             if not sim.fireballs[fi].active or sim.fireballs[fi].duration <= Float32(0.0):
                 continue
@@ -366,13 +450,12 @@ struct RobotechRenderer(Movable):
             self.scene.draw_billboard(fb.pos, rad, FX_SOFT, 0xFFFF5E28, core_a, emissive=2.35)
             self.scene.draw_billboard(fb.pos, rad * 0.52, FX_SOFT, 0xFFFFFAC8, core_a, emissive=3.20)
 
-        # 8. Parallel SIMD Combat Sparks + High-Mach Velocity Motion Streaks
+        # 9. Parallel SIMD Combat Sparks + High-Mach Velocity Motion Streaks
         var spark_drawn = 0
         for s in range(MAX_SPARKS):
             var sl = sim.spark_life.get(s)
             if sl <= Float32(0.0):
                 continue
-            # Subsample tiny contrail sparks slightly since ribbons carry dense smoke, render all explosion sparks!
             var k = Int(sim.spark_kind[s])
             if k == 0 and (s & 3) != 0:
                 continue
@@ -407,7 +490,7 @@ struct RobotechRenderer(Movable):
                     emissive=1.4,
                 )
 
-        # 9. Finish 3D Scene, Record Crisp SDF TrueType Tactical HUD & Present GPU Frame!
+        # 10. Finish 3D Scene, Record Crisp SDF TrueType Tactical HUD & Present GPU Frame!
         self.scene.end_scene()
         self._draw_tactical_hud(sim)
         _ = self.scene.present_headless()
@@ -488,32 +571,40 @@ struct RobotechRenderer(Movable):
             if sx < 32 or sx > 1248 or sy < 48 or sy > 668:
                 continue
             var dist_m = Int((e.pos - sim.pos).length())
+            var is_qdl = e.kind == ENEMY_QUEADLUUN
             var is_glg = e.kind == ENEMY_GLAUG
-            var br = UInt8(255) if is_glg else UInt8(74)
-            var bg = UInt8(210) if is_glg else UInt8(224)
-            var bb = UInt8(56) if is_glg else UInt8(158)
+            var br = UInt8(255) if (is_qdl or is_glg) else UInt8(74)
+            var bg = UInt8(78) if is_qdl else (UInt8(210) if is_glg else UInt8(224))
+            var bb = UInt8(196) if is_qdl else (UInt8(56) if is_glg else UInt8(158))
             var box_r = max(13, min(36, 1650 // max(25, dist_m)))
             self._draw_bracket_ui(sx, sy, box_r, br, bg, bb)
 
             var bw = box_r * 2
             var fill_w = max(2, Int(Float32(bw) * (e.hp / max(Float32(1.0), e.max_hp))))
             self.scene.fb.draw_rectangle(sx - box_r, sy - box_r - 7, bw, 4, 18, 28, 42, 210)
-            self.scene.fb.draw_rectangle(
-                sx - box_r,
-                sy - box_r - 7,
-                fill_w,
-                4,
-                UInt8(255) if is_glg else UInt8(74),
-                UInt8(62) if is_glg else UInt8(224),
-                UInt8(92) if is_glg else UInt8(158),
-                240,
-            )
-            var tag = "GLAUG " if is_glg else "REGULT "
+            self.scene.fb.draw_rectangle(sx - box_r, sy - box_r - 7, fill_w, 4, br, bg, bb, 240)
+            var tag = "QUEADLUUN " if is_qdl else ("GLAUG " if is_glg else "REGULT ")
             self.scene.fb.draw_text(tag + String(dist_m) + "M", sx, sy + box_r + 6, 12, br, bg, bb, align=1)
 
             if e.lock_marks > 0:
                 self._draw_bracket_ui(sx, sy, box_r + 6, 255, 56, 88, 250)
                 self.scene.fb.draw_text("LOCK X" + String(e.lock_marks), sx, sy - box_r - 22, 13, 255, 224, 102, align=1)
+
+        # Thuverl-Salan Destroyer Boss 3D Reticle + Top Capital-Ship Armor Bar!
+        if sim.boss_active:
+            var bp_ui = self._project_ui(sim.boss_pos)
+            if bp_ui[2] and bp_ui[0] > 40 and bp_ui[0] < 1240 and bp_ui[1] > 56 and bp_ui[1] < 650:
+                var bdist = Int((sim.boss_pos - sim.pos).length())
+                self._draw_bracket_ui(bp_ui[0], bp_ui[1], 36, 255, 84, 152, 245)
+                self.scene.fb.draw_text("THUVERL-SALAN " + String(bdist) + "M", bp_ui[0], bp_ui[1] + 42, 13, 255, 120, 182, align=1)
+                if sim.boss_lock_marks > 0:
+                    self.scene.fb.draw_text("SALVO LOCK X" + String(sim.boss_lock_marks), bp_ui[0], bp_ui[1] - 52, 13, 255, 228, 96, align=1)
+
+            self._draw_hud_panel(cx - 270, 50, 540, 32, 0xFF3888, 215)
+            self.scene.fb.draw_text("THUVERL-SALAN HEAVY DESTROYER", cx - 256, 59, 12, 255, 168, 210)
+            var b_ratio = max(Float32(0.0), min(Float32(1.0), sim.boss_hp / max(Float32(1.0), sim.boss_max_hp)))
+            self.scene.fb.draw_rectangle_rounded(cx + 8, 60, 248, 12, 0.4, 28, 18, 36, 225)
+            self.scene.fb.draw_rectangle_rounded(cx + 8, 60, max(4, Int(b_ratio * Float32(248.0))), 12, 0.4, 255, 58, 132, 248)
 
         # Wingman Skull-2 IFF Tag
         var wp = self._project_ui(sim.wing_pos + Vec3(0.0, 2.6, 0.0))
@@ -527,38 +618,38 @@ struct RobotechRenderer(Movable):
         self.scene.fb.draw_rectangle(cx - 1, cy - 22, 2, 14, 76, 232, 255, 225)
         self.scene.fb.draw_rectangle(cx - 1, cy + 8, 2, 14, 76, 232, 255, 225)
 
-        # D. Top Tactical Telemetry & Squadron Header
-        self._draw_hud_panel(14, 10, 868, 36, 0xFFD038, 200)
+        # D. Top Tactical Telemetry & Campaign Mission Header
+        self._draw_hud_panel(14, 10, 892, 36, 0xFFD038, 200)
         self.scene.fb.draw_text(
-            "ROBOTECH SDF-1  |  WAVE "
+            sim.mission_title()
+            + "  |  WAVE "
             + String(sim.wave)
             + "  |  HOSTILES: "
-            + String(sim.active_enemy_count())
-            + "  |  KILLS: "
-            + String(sim.kills)
+            + String(sim.active_hostile_count())
             + "  |  SCORE: "
             + String(sim.score)
             + "  |  "
             + self.backend_label(),
             28,
             19,
-            15,
+            14,
             255,
             232,
             156,
-            fit=840,
+            fit=864,
         )
 
         if sim.comms_timer > Float32(0.0):
-            self._draw_hud_panel(cx - 285, 674, 570, 34, 0x4CE8FF, 210)
-            self.scene.fb.draw_text(sim.comms_banner, cx, 683, 13, 156, 242, 255, align=1, fit=544)
+            self._draw_hud_panel(cx - 295, 674, 590, 34, 0x4CE8FF, 210)
+            self.scene.fb.draw_text(sim.comms_banner, cx, 683, 13, 156, 242, 255, align=1, fit=564)
 
         if sim.incoming_missile_count > 0:
-            self._draw_hud_panel(cx - 240, 82, 480, 30, 0xFF2E4C, 225)
+            var warn_y = 88 if sim.boss_active else 54
+            self._draw_hud_panel(cx - 240, warn_y, 480, 30, 0xFF2E4C, 225)
             self.scene.fb.draw_text(
                 "WARNING: " + String(sim.incoming_missile_count) + " ZENTRAEDI MISSILES INBOUND — [Q/E] EVADE!",
                 cx,
-                90,
+                warn_y + 8,
                 13,
                 255,
                 156,
@@ -590,10 +681,20 @@ struct RobotechRenderer(Movable):
             var lz = (rel.x * sy_yaw + rel.z * cy_yaw) * Float32(0.24)
             var px = rcx + max(-54, min(54, Int(lx)))
             var py = rcy - max(-50, min(50, Int(lz)))
-            if sim.enemies[i].kind == ENEMY_GLAUG:
+            if sim.enemies[i].kind == ENEMY_QUEADLUUN:
+                self.scene.fb.draw_circle(px, py, 3.6, 255, 78, 196, 250)
+            elif sim.enemies[i].kind == ENEMY_GLAUG:
                 self.scene.fb.draw_circle(px, py, 3.5, 255, 212, 56, 250)
             else:
                 self.scene.fb.draw_circle(px, py, 2.8, 255, 64, 92, 245)
+
+        if sim.boss_active:
+            var brel = sim.boss_pos - sim.pos
+            var blx = (brel.x * cy_yaw - brel.z * sy_yaw) * Float32(0.22)
+            var blz = (brel.x * sy_yaw + brel.z * cy_yaw) * Float32(0.22)
+            var bpx = rcx + max(-52, min(52, Int(blx)))
+            var bpy = rcy - max(-48, min(48, Int(blz)))
+            self.scene.fb.draw_rectangle(bpx - 4, bpy - 4, 8, 8, 255, 72, 148, 255)
 
         for m in range(MAX_MISSILES):
             if sim.mis_active[m] and sim.mis_team[m] != TEAM_UN_SPACY:
@@ -604,28 +705,29 @@ struct RobotechRenderer(Movable):
                 var py = rcy - max(-50, min(50, Int(lz)))
                 self.scene.fb.draw_rectangle(px - 1, py - 1, 3, 3, 255, 120, 255, 240)
 
-        # F. Bottom-Left VF-1 Transformation & Thermonuclear Systems Panel
-        var bl_y = 596
+        # F. Bottom-Left VF-1 Transformation, FAST Packs & SDF-1 Systems Panel
+        var bl_y = 584
         var mode_col = UInt32(0x4CE8FF) if sim.mode == MODE_FIGHTER else (UInt32(0xFFD038) if sim.mode == MODE_GUARDIAN else UInt32(0x38FFB0))
-        self._draw_hud_panel(14, bl_y, 386, 112, mode_col, 210)
+        self._draw_hud_panel(14, bl_y, 386, 124, mode_col, 210)
+        var rig_prefix = "SUPER VF-1S: " if sim.fast_packs else "VF-1S MODE: "
         self.scene.fb.draw_text(
-            "VF-1S MODE: " + sim.mode_name(),
+            rig_prefix + sim.mode_name(),
             28,
-            bl_y + 11,
-            17,
+            bl_y + 10,
+            16,
             UInt8((mode_col >> 16) & 255),
             UInt8((mode_col >> 8) & 255),
             UInt8(mode_col & 255),
         )
-        self.scene.fb.draw_text("[1] FIGHTER  [2] GUARDIAN  [3] BATTLOID  [TAB]", 28, bl_y + 34, 12, 162, 192, 222, fit=358)
+        self.scene.fb.draw_text("[1-3/TAB] MODE  [G] FAST PACK  [F1] MISSION", 28, bl_y + 31, 11, 162, 192, 222, fit=358)
 
-        self.scene.fb.draw_text("HULL", 28, bl_y + 54, 12, 220, 232, 246)
-        self.scene.fb.draw_rectangle_rounded(104, bl_y + 55, 168, 9, 0.4, 24, 36, 52, 220)
+        self.scene.fb.draw_text("HULL", 28, bl_y + 50, 11, 220, 232, 246)
+        self.scene.fb.draw_rectangle_rounded(104, bl_y + 51, 168, 8, 0.4, 24, 36, 52, 220)
         self.scene.fb.draw_rectangle_rounded(
             104,
-            bl_y + 55,
+            bl_y + 51,
             max(4, Int(sim.hull * Float32(1.68))),
-            9,
+            8,
             0.4,
             UInt8(74) if sim.hull > Float32(35.0) else UInt8(255),
             UInt8(216) if sim.hull > Float32(35.0) else UInt8(62),
@@ -633,40 +735,67 @@ struct RobotechRenderer(Movable):
             245,
         )
 
-        self.scene.fb.draw_text("BARRIER", 28, bl_y + 72, 12, 220, 232, 246)
-        self.scene.fb.draw_rectangle_rounded(104, bl_y + 73, 168, 9, 0.4, 24, 36, 52, 220)
-        self.scene.fb.draw_rectangle_rounded(104, bl_y + 73, max(4, Int(sim.shield * Float32(1.68))), 9, 0.4, 76, 232, 255, 245)
+        self.scene.fb.draw_text("BARRIER", 28, bl_y + 67, 11, 220, 232, 246)
+        self.scene.fb.draw_rectangle_rounded(104, bl_y + 68, 168, 8, 0.4, 24, 36, 52, 220)
+        self.scene.fb.draw_rectangle_rounded(104, bl_y + 68, max(4, Int(sim.shield * Float32(1.68))), 8, 0.4, 76, 232, 255, 245)
 
-        self.scene.fb.draw_text("THRUST", 28, bl_y + 90, 12, 220, 232, 246)
-        self.scene.fb.draw_rectangle_rounded(104, bl_y + 91, 168, 9, 0.4, 24, 36, 52, 220)
-        self.scene.fb.draw_rectangle_rounded(104, bl_y + 91, max(4, Int(sim.boost_fuel * Float32(1.68))), 9, 0.4, 255, 184, 56, 245)
-        self.scene.fb.draw_text(String(Int(sim.vel.length())) + " M/S", 384, bl_y + 68, 18, 255, 226, 128, align=2)
+        self.scene.fb.draw_text("THRUST", 28, bl_y + 84, 11, 220, 232, 246)
+        self.scene.fb.draw_rectangle_rounded(104, bl_y + 85, 168, 8, 0.4, 24, 36, 52, 220)
+        self.scene.fb.draw_rectangle_rounded(104, bl_y + 85, max(4, Int(sim.boost_fuel * Float32(1.68))), 8, 0.4, 255, 184, 56, 245)
 
-        # G. Bottom-Right GU-11 Gunpod & Itano Circus Salvo Panel
+        self.scene.fb.draw_text("SDF-1", 28, bl_y + 101, 11, 162, 242, 220)
+        self.scene.fb.draw_rectangle_rounded(104, bl_y + 102, 168, 8, 0.4, 24, 36, 52, 220)
+        self.scene.fb.draw_rectangle_rounded(104, bl_y + 102, max(4, Int(sim.sdf1_hull * Float32(1.68))), 8, 0.4, 64, 248, 188, 245)
+        self.scene.fb.draw_text(String(Int(sim.vel.length())) + " M/S", 384, bl_y + 74, 18, 255, 226, 128, align=2)
+
+        # G. Bottom-Right GU-11 / Strike Cannon, 60-Missile Itano Circus & SDF-1 Reflex Cannon Panel
         var br_x = 880
-        self._draw_hud_panel(br_x, bl_y, 386, 112, 0xFF8C38, 210)
-        self.scene.fb.draw_text("WEAPONS & ITANO CIRCUS", br_x + 14, bl_y + 11, 17, 255, 186, 88)
-        var gun_txt = "RELOADING DRUM..." if sim.gun_reload_t > Float32(0.0) else (String(sim.gun_ammo) + " / 200 RDS")
-        self.scene.fb.draw_text("GU-11 GUNPOD [J / LMB]: " + gun_txt, br_x + 14, bl_y + 35, 12, 232, 240, 250, fit=358)
+        self._draw_hud_panel(br_x, bl_y, 386, 124, 0xFF8C38, 210)
+        self.scene.fb.draw_text("ORDNANCE & SDF-1 REFLEX", br_x + 14, bl_y + 10, 16, 255, 186, 88)
+        var gun_txt = "RELOADING..." if sim.gun_reload_t > Float32(0.0) else (String(sim.gun_ammo) + "/200")
+        var cannon_tag = " + RO-X2A STRIKE" if sim.fast_packs else ""
+        self.scene.fb.draw_text("GU-11" + cannon_tag + ": " + gun_txt, br_x + 14, bl_y + 32, 12, 232, 240, 250, fit=358)
+
+        var mis_cap = sim.max_missiles()
         self.scene.fb.draw_text(
-            "MICRO-MISSILES [M / R SALVO]: " + String(sim.missiles_ready) + " / 36",
+            "MISSILES [M/R]: " + String(sim.missiles_ready) + " / " + String(mis_cap) + "  (LOCKS: " + String(sim.total_locks) + ")",
             br_x + 14,
-            bl_y + 53,
+            bl_y + 50,
             12,
             156,
             242,
             255,
             fit=358,
         )
-        self.scene.fb.draw_rectangle_rounded(br_x + 14, bl_y + 71, 358, 10, 0.4, 24, 36, 52, 220)
-        self.scene.fb.draw_rectangle_rounded(br_x + 14, bl_y + 71, max(4, (sim.missiles_ready * 358) // 36), 10, 0.4, 255, 142, 56, 245)
+        self.scene.fb.draw_rectangle_rounded(br_x + 14, bl_y + 66, 358, 9, 0.4, 24, 36, 52, 220)
+        self.scene.fb.draw_rectangle_rounded(br_x + 14, bl_y + 66, max(4, (sim.missiles_ready * 358) // max(1, mis_cap)), 9, 0.4, 255, 142, 56, 245)
+
+        var r_ready = sim.reflex_charge >= Float32(100.0)
+        var r_label = (
+            "SDF-1 REFLEX CANNON: FIRING!!"
+            if sim.reflex_beam_t > Float32(0.0)
+            else ("SDF-1 REFLEX CANNON [F]: READY!" if r_ready else ("SDF-1 REFLEX [F]: " + String(Int(sim.reflex_charge)) + "%  [F5/F9] SAVE"))
+        )
         self.scene.fb.draw_text(
-            "ACTIVE LOCKS: " + String(sim.total_locks) + "   |   [V] CAM   [Q/E] ROLL",
+            r_label,
             br_x + 14,
-            bl_y + 89,
+            bl_y + 82,
             12,
-            255,
-            212,
-            64,
+            UInt8(88) if r_ready else UInt8(210),
+            UInt8(255) if r_ready else UInt8(224),
+            UInt8(232) if r_ready else UInt8(242),
             fit=358,
+        )
+        self.scene.fb.draw_rectangle_rounded(br_x + 14, bl_y + 100, 358, 9, 0.4, 24, 36, 52, 220)
+        var r_fill = 358 if sim.reflex_beam_t > Float32(0.0) else max(4, Int(sim.reflex_charge * Float32(3.58)))
+        self.scene.fb.draw_rectangle_rounded(
+            br_x + 14,
+            bl_y + 100,
+            r_fill,
+            9,
+            0.4,
+            UInt8(72) if r_ready or sim.reflex_beam_t > Float32(0.0) else UInt8(64),
+            UInt8(250) if r_ready or sim.reflex_beam_t > Float32(0.0) else UInt8(188),
+            UInt8(255),
+            UInt8(248),
         )
