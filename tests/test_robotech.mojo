@@ -1,5 +1,6 @@
 """Verification Suite for Robotech: SDF-1 Veritech Combat Simulator (`flint.*`)."""
 from std.testing import assert_equal, assert_true
+from flint.platform.os import read_bytes
 from flint.render.simd_canvas import SimdCanvas
 from flint.render.flip import flip_error_map, flip_mean
 from robotech.audio_synth import (
@@ -87,21 +88,42 @@ def test_procedural_robotech_audio_synth() raises:
 
 def test_renderer_and_cockpit_flip_diff() raises:
     var sim = RobotechSimWorld(2)
-    var renderer = RobotechRenderer()
+    var renderer = RobotechRenderer(320, 180, prefer_gpu=True)
+    assert_true(renderer.fonts_loaded)
+    assert_true(len(read_bytes("assets/models/vf1s_valkyrie.glb")) > 4096)
+    assert_true(len(read_bytes("assets/models/regult_pod.glb")) > 4096)
+    assert_true(len(read_bytes("assets/models/glaug_officer.glb")) > 4096)
+    assert_true(len(read_bytes("assets/models/sdf1_macross.glb")) > 4096)
+    assert_true(len(read_bytes("assets/sky/earth_orbit.png")) > 4096)
+
     var c_chase = SimdCanvas(320, 180)
     var c_cockpit = SimdCanvas(320, 180)
 
     renderer.cam_mode = CAM_CHASE
     renderer.render_frame(c_chase, sim, True)
-    assert_true(c_chase.triangles_drawn > 50)
+    assert_true(c_chase.triangles_drawn > 2500)
 
     renderer.cam_mode = CAM_COCKPIT
     renderer.render_frame(c_cockpit, sim, False)
+    assert_true(c_cockpit.triangles_drawn > 1500)
 
     var diff = flip_mean(flip_error_map(c_chase.pixels, c_cockpit.pixels, 320, 180))
     assert_true(diff > 0.02)
+
+    # Also verify CPU PBR fallback path works cleanly
+    var cpu_renderer = RobotechRenderer(160, 90, prefer_gpu=False)
+    var c_cpu = SimdCanvas(160, 90)
+    cpu_renderer.render_frame(c_cpu, sim, True)
+    assert_true(c_cpu.triangles_drawn > 500)
+
     sim.shutdown()
-    print("  [PASS] 3D Mecha + SDF-1 Cruiser Render & Chase-vs-Cockpit LDR-FLIP Verification")
+    print(
+        "  [PASS] GLB 2.0 Assets, SDF Cockpit Font & GPU PBR Render ("
+        + renderer.backend_label()
+        + " -> "
+        + String(c_chase.triangles_drawn)
+        + " tris/frame)"
+    )
 
 
 def main() raises:

@@ -124,8 +124,9 @@ def render_showcase_shots():
     var w = 1280
     var h = 720
     var canvas = SimdCanvas(w, h)
-    var renderer = RobotechRenderer()
+    var renderer = RobotechRenderer(w, h)
     var overlays = FlintDevOverlays()
+    overlays.active_backend_name = renderer.backend_label()
     overlays.show_profiler = True
 
     # Shot 1: Fighter Mode + 24-Missile Corkscrewing Itano Circus Swarm in Mid-Air!
@@ -179,6 +180,9 @@ def render_showcase_shots():
     c_batt.request_mode = MODE_BATTLOID
     sim.step(c_batt, Float32(0.04))
     var c_duel = PilotControls()
+    c_duel.throttle_in = Float32(0.65)
+    c_duel.strafe_x = Float32(0.42)
+    c_duel.lift_y = Float32(0.18)
     c_duel.fire_gunpod = True
     c_duel.boost_held = True  # Activates cyan Pinpoint Barrier Shield on left arm!
     for _ in range(16):
@@ -192,29 +196,28 @@ def render_showcase_shots():
     c_duel.quick_salvo = True
     sim.step(c_duel, Float32(0.03))
     c_duel.quick_salvo = False
-    for _ in range(5):
+    for _ in range(4):
         sim.step(c_duel, Float32(0.03))
     renderer.cam_mode = CAM_ACTION
     renderer.render_frame(canvas, sim, True)
     _ = write_png("build/shots/battloid_duel_glaug.png", canvas.pixels, w, h)
+    sim.shutdown()
 
-    # Shot 4: First-Person VF-1 Holographic Cockpit Canopy View with Multi-Lock Reticles!
-    for i in range(len(sim.enemies)):
-        if sim.enemies[i].active:
-            var dir_e = (sim.enemies[i].pos - sim.pos).normalized()
-            sim.yaw = atan2(dir_e.x, dir_e.z)
-            sim.pitch = dir_e.y * Float32(0.6)
-            break
+    # Shot 4: First-Person VF-1 Armored Cockpit Canopy View with Multi-Lock Reticles & SDF-1!
+    var sim_cockpit = RobotechSimWorld(4)
     var c_lock = PilotControls()
     c_lock.lock_held = True
+    c_lock.throttle_in = Float32(0.72)
+    for _ in range(10):
+        sim_cockpit.step(c_lock, Float32(0.04))
     c_lock.fire_gunpod = True
-    for _ in range(12):
-        sim.step(c_lock, Float32(0.04))
+    for _ in range(4):
+        sim_cockpit.step(c_lock, Float32(0.03))
     renderer.cam_mode = CAM_COCKPIT
-    renderer.render_frame(canvas, sim, False)
+    renderer.render_frame(canvas, sim_cockpit, False)
     _ = write_png("build/shots/cockpit_tactical_hud.png", canvas.pixels, w, h)
 
-    sim.shutdown()
+    sim_cockpit.shutdown()
     print("[Robotech] Wrote 4 showcase combat screenshots -> build/shots/")
 
 
@@ -227,9 +230,10 @@ def main():
     var w = 1280
     var h = 720
     var sim = RobotechSimWorld()
-    var renderer = RobotechRenderer()
+    var renderer = RobotechRenderer(w, h)
     var canvas = SimdCanvas(w, h)
     var overlays = FlintDevOverlays()
+    overlays.active_backend_name = renderer.backend_label()
     var audio = RobotechAudioBank(True)
 
     var win = WaylandWindow()

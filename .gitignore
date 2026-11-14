@@ -1,5 +1,6 @@
 # Pixi & Mojo build artifacts
 .pixi/
+pixi.lock
 build/
 saves/
 *.egg-info

@@ -26,9 +26,11 @@ comptime TEAM_ZENTRAEDI: Int = 1
 
 comptime MAX_ENEMIES: Int = 24
 comptime MAX_MISSILES: Int = 256
+comptime MIS_TRAIL_LEN: Int = 10
 comptime MAX_BOLTS: Int = 256
 comptime MAX_SPARKS: Int = 2048
 comptime SPARK_CHUNK: Int = 256
+comptime MAX_FIREBALLS: Int = 24
 
 # Sound event flags bitmask emitted per tick so headless tests & live audio decouple cleanly
 comptime EVT_TRANSFORM: Int = 1 << 0
@@ -98,6 +100,22 @@ struct ZentraediUnit(Copyable, ImplicitlyCopyable, Movable):
         self.stride_phase = 0.0
         self.lock_marks = 0
         self.firing_flash = 0.0
+
+
+@fieldwise_init
+struct CombatFireball(Copyable, ImplicitlyCopyable, Movable):
+    var active: Bool
+    var pos: Vec3
+    var max_radius: Float32
+    var life: Float32
+    var duration: Float32
+
+    def __init__(out self):
+        self.active = False
+        self.pos = Vec3()
+        self.max_radius = 4.5
+        self.life = 0.0
+        self.duration = 0.65
 
 
 @fieldwise_init
@@ -206,6 +224,10 @@ struct RobotechSimWorld(Movable):
     var mis_vz: SimdColumn[DType.float32]
     var mis_phase: SimdColumn[DType.float32]
     var mis_life: SimdColumn[DType.float32]
+    var mis_trail: List[Vec3]
+    var mis_trail_len: List[Int]
+    var fireballs: List[CombatFireball]
+    var fireball_cursor: Int
 
     # GU-11 Gunpod & Zentraedi Plasma Bolts (SoA)
     var bolt_active: List[Bool]
@@ -304,6 +326,10 @@ struct RobotechSimWorld(Movable):
         self.mis_vz = SimdColumn[DType.float32](MAX_MISSILES)
         self.mis_phase = SimdColumn[DType.float32](MAX_MISSILES)
         self.mis_life = SimdColumn[DType.float32](MAX_MISSILES)
+        self.mis_trail = List[Vec3](length=MAX_MISSILES * MIS_TRAIL_LEN, fill=Vec3())
+        self.mis_trail_len = List[Int](length=MAX_MISSILES, fill=0)
+        self.fireballs = List[CombatFireball](length=MAX_FIREBALLS, fill=CombatFireball())
+        self.fireball_cursor = 0
 
         self.bolt_active = List[Bool](length=MAX_BOLTS, fill=False)
         self.bolt_team = List[Int](length=MAX_BOLTS, fill=TEAM_UN_SPACY)
@@ -394,6 +420,14 @@ struct RobotechSimWorld(Movable):
             var kind = UInt8(1) if self.rand_f32() < Float32(0.65) else UInt8(2)
             self.emit_spark(center, dir * sp, Float32(0.45) + self.rand_f32() * Float32(0.65), kind)
         self.sound_events |= EVT_EXPLODE
+        var fb = CombatFireball()
+        fb.active = True
+        fb.pos = center
+        fb.max_radius = Float32(4.4) if count >= 30 else Float32(2.6)
+        fb.duration = Float32(0.72) if count >= 30 else Float32(0.42)
+        fb.life = fb.duration
+        self.fireballs[self.fireball_cursor] = fb
+        self.fireball_cursor = (self.fireball_cursor + 1) % MAX_FIREBALLS
         var dist = (center - self.pos).length()
         if dist < Float32(120.0):
             self.cam_shake = min(Float32(2.5), self.cam_shake + (Float32(120.0) - dist) / Float32(75.0))
@@ -474,6 +508,10 @@ struct RobotechSimWorld(Movable):
                 self.mis_vz.set(i, init_vel.z)
                 self.mis_phase.set(i, self.rand_f32() * Float32(6.2831853))
                 self.mis_life.set(i, Float32(5.2))
+                var base = i * MIS_TRAIL_LEN
+                for k in range(MIS_TRAIL_LEN):
+                    self.mis_trail[base + k] = origin
+                self.mis_trail_len[i] = 1
                 return
 
     def launch_itano_salvo(mut self, max_count: Int = 24):
@@ -544,6 +582,11 @@ struct RobotechSimWorld(Movable):
             self.comms_timer = max(Float32(0.0), self.comms_timer - dt)
         if self.cam_shake > Float32(0.0):
             self.cam_shake = max(Float32(0.0), self.cam_shake - dt * Float32(3.8))
+        for fi in range(MAX_FIREBALLS):
+            if self.fireballs[fi].active:
+                self.fireballs[fi].life -= dt
+                if self.fireballs[fi].life <= Float32(0.0):
+                    self.fireballs[fi].active = False
 
         # 1. Mode Switch & Smooth VF-1 Transformation Springs
         if ctrl.request_mode >= 0:
@@ -809,6 +852,12 @@ struct RobotechSimWorld(Movable):
             self.mis_vx.set(m, mvel.x)
             self.mis_vy.set(m, mvel.y)
             self.mis_vz.set(m, mvel.z)
+            var tbase = m * MIS_TRAIL_LEN
+            var tlen = min(MIS_TRAIL_LEN, self.mis_trail_len[m] + 1)
+            for k in range(tlen - 1, 0, -1):
+                self.mis_trail[tbase + k] = self.mis_trail[tbase + k - 1]
+            self.mis_trail[tbase] = mpos
+            self.mis_trail_len[m] = tlen
 
             # Contrail smoke spark
             self.emit_spark(
